@@ -223,6 +223,7 @@ class Backtester:
                 self.config.indicators.ema_slow,
                 self.config.indicators.ema_long,
                 self.config.indicators.macd_slow,
+                self.config.strategy.breakout_lookback if self.config.strategy.breakout_enabled else 0,
             )
             + 5
         )

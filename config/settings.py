@@ -62,11 +62,19 @@ class StrategyConfig:
     # Trend-following module
     trend_follow_adx_min: float = 25.0  # stronger trend required
     trend_follow_enabled: bool = True
+    # Volatility-adaptive cooldown
+    cooldown_vol_threshold: float = 0.03  # when ATR/price > 3%, scale cooldown up
     # Higher-timeframe filter
     htf_enabled: bool = True
     htf_timeframe: str = "4h"           # higher timeframe for trend confirmation
     htf_ema_fast: int = 9               # ~1.5 days on 4h
     htf_ema_slow: int = 21              # ~3.5 days on 4h
+    # Range breakout module
+    breakout_enabled: bool = True
+    breakout_lookback: int = 336        # 336h = 14 days
+    breakout_volume_min: float = 1.5    # need above-average volume for breakout
+    breakout_sl_atr: float = 2.5        # wider stop for breakout trades
+    breakout_max_range_pct: float = 0.15  # range must be < 15% of price (consolidation)
 
 
 @dataclass
@@ -77,7 +85,8 @@ class RiskConfig:
     max_drawdown_reduce: float = 0.15        # 15% -> halve position size
     max_drawdown_stop: float = 0.25          # 25% -> full shutdown
     mean_reversion_sl_atr: float = 1.5       # stop = 1.5 x ATR
-    momentum_sl_atr: float = 1.5             # stop = 1.5 x ATR
+    momentum_sl_atr: float = 1.5             # stop = 1.5 x ATR (long)
+    momentum_short_sl_atr: float = 1.5       # same as long side (wider hurts globally)
     trend_follow_sl_atr: float = 2.0         # wider stop for trend trades
     trailing_activation_pct: float = 0.008   # activate after +0.8%
     trailing_atr_multiplier: float = 1.0     # trail at 1 x ATR

@@ -53,9 +53,17 @@ class Strategy:
     def record_trade(self, symbol: str):
         self._last_trade_candle[symbol] = self._candle_counter
 
-    def _cooldown_ok(self, symbol: str) -> bool:
+    def _cooldown_ok(self, symbol: str, atr_pct: float = 0.0) -> bool:
         last = self._last_trade_candle.get(symbol, -999)
-        return (self._candle_counter - last) >= self.config.strategy.cooldown_candles
+        base = self.config.strategy.cooldown_candles
+        threshold = self.config.strategy.cooldown_vol_threshold
+        # Scale cooldown up when volatility is high (e.g. AVAX)
+        if threshold > 0 and atr_pct > threshold:
+            multiplier = atr_pct / threshold  # e.g. 6%/3% = 2x cooldown
+            effective = int(base * multiplier)
+        else:
+            effective = base
+        return (self._candle_counter - last) >= effective
 
     # -- regime detection -----------------------------------------------
 
@@ -125,11 +133,11 @@ class Strategy:
 
         # entries (skip during transition, cooldown, or extreme volatility)
         if not has_position:
-            if regime == Regime.TRANSITION and not self.config.strategy.trend_follow_enabled:
-                return self._no_signal(regime, price, atr)
-            if symbol and not self._cooldown_ok(symbol):
+            if regime == Regime.TRANSITION and not self.config.strategy.trend_follow_enabled and not self.config.strategy.breakout_enabled:
                 return self._no_signal(regime, price, atr)
             atr_pct = atr / price if price > 0 else 0
+            if symbol and not self._cooldown_ok(symbol, atr_pct):
+                return self._no_signal(regime, price, atr)
             if atr_pct > self.config.strategy.max_atr_pct:
                 return self._no_signal(regime, price, atr)
 
@@ -164,6 +172,14 @@ class Strategy:
             # trend-follow (any regime, uses its own ADX filter)
             if self.config.strategy.trend_follow_enabled:
                 sig = self._trend_follow_entry(last, regime, price, atr)
+                if sig.signal != Signal.NO_SIGNAL:
+                    if not self._sentiment_blocks(sig.signal, fear_greed):
+                        if not self._htf_blocks(sig.signal, htf_bias):
+                            return sig
+
+            # range breakout (any regime, catches BTC-like moves)
+            if self.config.strategy.breakout_enabled:
+                sig = self._breakout_entry(df, last, regime, price, atr)
                 if sig.signal != Signal.NO_SIGNAL:
                     if not self._sentiment_blocks(sig.signal, fear_greed):
                         if not self._htf_blocks(sig.signal, htf_bias):
@@ -306,7 +322,7 @@ class Strategy:
             and vol_ratio > sc.momentum_volume_min
             and self._short_trend_ok(last, price)  # price below EMA(50)
         ):
-            stop = price + rc.momentum_sl_atr * atr
+            stop = price + rc.momentum_short_sl_atr * atr  # wider stop for shorts
             return TradeSignal(
                 signal=Signal.SHORT_ENTRY,
                 regime=regime,
@@ -381,6 +397,65 @@ class Strategy:
 
         return self._no_signal(regime, price, atr)
 
+    # -- range breakout module -----------------------------------------
+
+    def _breakout_entry(
+        self, df: pd.DataFrame, last, regime: Regime, price: float, atr: float,
+    ) -> TradeSignal:
+        sc = self.config.strategy
+        rc = self.config.risk
+
+        lookback = sc.breakout_lookback
+        if len(df) < lookback + 1:
+            return self._no_signal(regime, price, atr)
+
+        vol_ratio = last["volume_ratio"]
+        if vol_ratio < sc.breakout_volume_min:
+            return self._no_signal(regime, price, atr)
+
+        window = df.iloc[-(lookback + 1):-1]  # previous N candles (not current)
+        range_high = window["high"].max()
+        range_low = window["low"].min()
+
+        # Range must be tight (consolidation) — skip if range > max_range_pct
+        range_width = (range_high - range_low) / price if price > 0 else 1
+        if range_width > sc.breakout_max_range_pct:
+            return self._no_signal(regime, price, atr)
+
+        # LONG breakout: close above 14-day high
+        if price > range_high:
+            stop = price - sc.breakout_sl_atr * atr
+            return TradeSignal(
+                signal=Signal.LONG_ENTRY,
+                regime=regime,
+                module="breakout",
+                price=price,
+                atr=atr,
+                stop_loss=stop,
+                reason=(
+                    f"BREAKOUT LONG: price>{range_high:.2f} "
+                    f"(7d high) vol={vol_ratio:.1f}"
+                ),
+            )
+
+        # SHORT breakout: close below 14-day low + bearish trend
+        if price < range_low and self._short_trend_ok(last, price):
+            stop = price + sc.breakout_sl_atr * atr
+            return TradeSignal(
+                signal=Signal.SHORT_ENTRY,
+                regime=regime,
+                module="breakout",
+                price=price,
+                atr=atr,
+                stop_loss=stop,
+                reason=(
+                    f"BREAKOUT SHORT: price<{range_low:.2f} "
+                    f"(7d low) vol={vol_ratio:.1f}"
+                ),
+            )
+
+        return self._no_signal(regime, price, atr)
+
     # -- exit checks (module + side aware) ------------------------------
 
     def _check_exit(
@@ -394,7 +469,7 @@ class Strategy:
 
         # --- LONG exits ---
 
-        if position_module == "trend_follow":
+        if position_module in ("trend_follow", "breakout"):
             if last["rsi"] > sc.rsi_momentum_max:
                 return TradeSignal(
                     signal=Signal.LONG_EXIT,
@@ -403,7 +478,7 @@ class Strategy:
                     price=price,
                     atr=atr,
                     stop_loss=0,
-                    reason=f"TF extreme RSI: {last['rsi']:.1f}",
+                    reason=f"{position_module.upper()} extreme RSI: {last['rsi']:.1f}",
                 )
             return None  # trailing handles the rest
 
@@ -452,7 +527,7 @@ class Strategy:
     ) -> TradeSignal | None:
         sc = self.config.strategy
 
-        if position_module == "trend_follow":
+        if position_module in ("trend_follow", "breakout"):
             if last["rsi"] < (100 - sc.rsi_momentum_max):  # RSI < 20
                 return TradeSignal(
                     signal=Signal.SHORT_EXIT,
@@ -461,7 +536,7 @@ class Strategy:
                     price=price,
                     atr=atr,
                     stop_loss=0,
-                    reason=f"TF extreme oversold RSI: {last['rsi']:.1f}",
+                    reason=f"{position_module.upper()} extreme oversold RSI: {last['rsi']:.1f}",
                 )
             return None
 

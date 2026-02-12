@@ -285,7 +285,7 @@ def main():
         shorts = [t for t in res.trades if t.side == "short"]
         print(f"\n--- {r['symbol']} ({res.total_trades} trades: {len(longs)}L / {len(shorts)}S) ---")
         # Show win/loss breakdown by module
-        for mod_name in ["mean_reversion", "momentum", "trend_follow"]:
+        for mod_name in ["mean_reversion", "momentum", "trend_follow", "breakout"]:
             mod_trades = [t for t in res.trades if t.module == mod_name]
             if not mod_trades:
                 continue
@@ -293,7 +293,7 @@ def main():
             mod_shorts = [t for t in mod_trades if t.side == "short"]
             wins = sum(1 for t in mod_trades if t.pnl > 0)
             pnl = sum(t.pnl for t in mod_trades)
-            label = {"mean_reversion": "MeanRev", "momentum": "Momentum", "trend_follow": "TrendFol"}[mod_name]
+            label = {"mean_reversion": "MeanRev", "momentum": "Momentum", "trend_follow": "TrendFol", "breakout": "Breakout"}[mod_name]
             print(
                 f"  {label:>10}: {len(mod_trades):3d} trades "
                 f"({len(mod_longs)}L/{len(mod_shorts)}S), "
@@ -313,6 +313,12 @@ def main():
     print(f"  Cooldown:         {config.strategy.cooldown_candles} candles")
     print(f"  Partial TP:       {config.risk.partial_tp_enabled} ({config.risk.partial_tp_ratio}x, {config.risk.partial_tp_size:.0%})")
     print(f"  Trend-follow:     {config.strategy.trend_follow_enabled}")
+    print(f"  Breakout:         {config.strategy.breakout_enabled}"
+          f" (lookback={config.strategy.breakout_lookback}h,"
+          f" vol>={config.strategy.breakout_volume_min},"
+          f" range<{config.strategy.breakout_max_range_pct:.0%})")
+    print(f"  Vol cooldown:     threshold={config.strategy.cooldown_vol_threshold:.0%}")
+    print(f"  Mom short SL:     {config.risk.momentum_short_sl_atr}x ATR")
     print(f"  Sentiment F&G:    {config.sentiment.fear_greed_enabled}"
           f" (fear<={config.sentiment.extreme_fear_threshold} blocks shorts,"
           f" greed>={config.sentiment.extreme_greed_threshold} blocks longs)")

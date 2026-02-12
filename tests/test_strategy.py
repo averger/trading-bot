@@ -311,3 +311,136 @@ class TestHTFFilter:
         # HTF disabled -> bearish bias doesn't block
         sig = s.generate_signal(df, has_position=False, htf_bias=-1)
         assert sig.signal == Signal.LONG_ENTRY
+
+
+class TestVolatilityAdaptiveCooldown:
+    def test_normal_volatility_uses_base_cooldown(self):
+        s = Strategy(Config())
+        s.set_candle_index(0)
+        s.record_trade("BTC/USDT")
+        # ATR/price = 1% < threshold (3%), so base cooldown=6
+        s.set_candle_index(6)
+        assert s._cooldown_ok("BTC/USDT", atr_pct=0.01)
+
+    def test_high_volatility_extends_cooldown(self):
+        s = Strategy(Config())
+        s.set_candle_index(0)
+        s.record_trade("AVAX/USDT")
+        # ATR/price = 6% > threshold 3%, multiplier=2x, effective=12
+        s.set_candle_index(6)
+        assert not s._cooldown_ok("AVAX/USDT", atr_pct=0.06)  # 6 < 12
+
+    def test_high_volatility_allows_after_extended(self):
+        s = Strategy(Config())
+        s.set_candle_index(0)
+        s.record_trade("AVAX/USDT")
+        # ATR/price = 6%, multiplier=2x, effective=12
+        s.set_candle_index(12)
+        assert s._cooldown_ok("AVAX/USDT", atr_pct=0.06)
+
+    def test_no_previous_trade_always_ok(self):
+        s = Strategy(Config())
+        s.set_candle_index(0)
+        assert s._cooldown_ok("NEW/USDT", atr_pct=0.10)
+
+
+class TestMomentumShortWiderStop:
+    def test_momentum_short_uses_wider_stop(self):
+        s = Strategy(Config())
+        df = _df_with_indicators()
+        last = df.iloc[-1]
+        price = last["close"]
+        atr = last["atr"]
+        # Force momentum short conditions
+        df.iloc[-1, df.columns.get_loc("rsi")] = 40.0
+        df.iloc[-1, df.columns.get_loc("adx")] = 30.0
+        bb_lower = last["bb_lower"]
+        df.iloc[-1, df.columns.get_loc("close")] = bb_lower - 5
+        df.iloc[-1, df.columns.get_loc("ema_fast")] = bb_lower - 3
+        df.iloc[-1, df.columns.get_loc("ema_slow")] = bb_lower - 1
+        df.iloc[-1, df.columns.get_loc("macd")] = -1.0
+        df.iloc[-1, df.columns.get_loc("macd_hist")] = -0.5
+        df.iloc[-1, df.columns.get_loc("macd_signal")] = -0.5
+        df.iloc[-1, df.columns.get_loc("volume_ratio")] = 1.5
+        df.iloc[-1, df.columns.get_loc("ema_long")] = bb_lower + 10
+
+        sig = s.generate_signal(df, has_position=False)
+        if sig.signal == Signal.SHORT_ENTRY:
+            # Stop should use momentum_short_sl_atr (2.0) not momentum_sl_atr (1.5)
+            expected_stop = sig.price + s.config.risk.momentum_short_sl_atr * sig.atr
+            assert sig.stop_loss == pytest.approx(expected_stop, rel=0.01)
+
+
+class TestBreakoutModule:
+    def _breakout_df(self, n: int = 200):
+        """Create a longer DataFrame for breakout testing."""
+        return _df_with_indicators(n=n)
+
+    def test_breakout_long_above_range(self):
+        s = Strategy(Config())
+        df = self._breakout_df(n=250)
+        # Set breakout lookback to something we can test
+        s.config.strategy.breakout_lookback = 50
+        # Force price above 50-candle range high
+        window = df.iloc[-51:-1]
+        range_high = window["high"].max()
+        df.iloc[-1, df.columns.get_loc("close")] = range_high + 5
+        df.iloc[-1, df.columns.get_loc("volume_ratio")] = 1.5
+        # Disable other modules to isolate breakout
+        s.config.strategy.trend_follow_enabled = False
+        df.iloc[-1, df.columns.get_loc("rsi")] = 50.0  # neutral RSI
+
+        sig = s.generate_signal(df, has_position=False)
+        assert sig.signal == Signal.LONG_ENTRY
+        assert sig.module == "breakout"
+
+    def test_breakout_short_below_range(self):
+        s = Strategy(Config())
+        df = self._breakout_df(n=250)
+        s.config.strategy.breakout_lookback = 50
+        s.config.strategy.breakout_max_range_pct = 0.50  # relax for test data
+        # Force price below 50-candle range low
+        window = df.iloc[-51:-1]
+        range_low = window["low"].min()
+        df.iloc[-1, df.columns.get_loc("close")] = range_low - 5
+        df.iloc[-1, df.columns.get_loc("volume_ratio")] = 1.5
+        # Macro trend bearish: ema_long above price
+        df.iloc[-1, df.columns.get_loc("ema_long")] = range_low + 50
+        # Disable other modules
+        s.config.strategy.trend_follow_enabled = False
+        df.iloc[-1, df.columns.get_loc("rsi")] = 50.0
+
+        sig = s.generate_signal(df, has_position=False)
+        assert sig.signal == Signal.SHORT_ENTRY
+        assert sig.module == "breakout"
+
+    def test_breakout_disabled_no_signal(self):
+        s = Strategy(Config())
+        s.config.strategy.breakout_enabled = False
+        df = self._breakout_df(n=250)
+        s.config.strategy.breakout_lookback = 50
+        window = df.iloc[-51:-1]
+        range_high = window["high"].max()
+        df.iloc[-1, df.columns.get_loc("close")] = range_high + 5
+        df.iloc[-1, df.columns.get_loc("volume_ratio")] = 1.5
+        s.config.strategy.trend_follow_enabled = False
+        df.iloc[-1, df.columns.get_loc("rsi")] = 50.0
+
+        sig = s.generate_signal(df, has_position=False)
+        # Breakout disabled, so shouldn't get breakout signal
+        assert sig.module != "breakout"
+
+    def test_breakout_low_volume_no_signal(self):
+        s = Strategy(Config())
+        df = self._breakout_df(n=250)
+        s.config.strategy.breakout_lookback = 50
+        window = df.iloc[-51:-1]
+        range_high = window["high"].max()
+        df.iloc[-1, df.columns.get_loc("close")] = range_high + 5
+        df.iloc[-1, df.columns.get_loc("volume_ratio")] = 0.5  # below min
+        s.config.strategy.trend_follow_enabled = False
+        df.iloc[-1, df.columns.get_loc("rsi")] = 50.0
+        df.iloc[-1, df.columns.get_loc("adx")] = 15.0  # ranging, no trend-follow
+
+        sig = s.generate_signal(df, has_position=False)
+        assert sig.module != "breakout"
