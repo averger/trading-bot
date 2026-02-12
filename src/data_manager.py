@@ -94,4 +94,10 @@ class DataManager:
         df["prev_ema_fast"] = df["ema_fast"].shift(1)
         df["prev_ema_slow"] = df["ema_slow"].shift(1)
 
+        # Trend-follow specific EMAs (longer periods)
+        df["tf_ema_fast"] = compute_ema(df["close"], ic.tf_ema_fast)
+        df["tf_ema_slow"] = compute_ema(df["close"], ic.tf_ema_slow)
+        df["prev_tf_ema_fast"] = df["tf_ema_fast"].shift(1)
+        df["prev_tf_ema_slow"] = df["tf_ema_slow"].shift(1)
+
         return df

@@ -130,14 +130,20 @@ class TestSignalGeneration:
 
     def test_trend_follow_long_on_golden_cross(self):
         s = Strategy(Config())
+        s.config.strategy.trend_follow_enabled = True
         df = _df_with_indicators()
-        # Force EMA golden cross + MACD positive + ADX strong
-        df.iloc[-1, df.columns.get_loc("ema_fast")] = 110.0
-        df.iloc[-1, df.columns.get_loc("ema_slow")] = 105.0
-        df.iloc[-1, df.columns.get_loc("prev_ema_fast")] = 104.0  # was below
-        df.iloc[-1, df.columns.get_loc("prev_ema_slow")] = 105.0
+        # Add TF-specific EMA columns
+        df["tf_ema_fast"] = df["ema_fast"]
+        df["tf_ema_slow"] = df["ema_slow"]
+        df["prev_tf_ema_fast"] = df["tf_ema_fast"].shift(1)
+        df["prev_tf_ema_slow"] = df["tf_ema_slow"].shift(1)
+        # Force TF EMA golden cross + MACD positive + ADX strong
+        df.iloc[-1, df.columns.get_loc("tf_ema_fast")] = 110.0
+        df.iloc[-1, df.columns.get_loc("tf_ema_slow")] = 105.0
+        df.iloc[-1, df.columns.get_loc("prev_tf_ema_fast")] = 104.0  # was below
+        df.iloc[-1, df.columns.get_loc("prev_tf_ema_slow")] = 105.0
         df.iloc[-1, df.columns.get_loc("macd_hist")] = 0.5
-        df.iloc[-1, df.columns.get_loc("adx")] = 25.0
+        df.iloc[-1, df.columns.get_loc("adx")] = 36.0
         # Clear MR/MOM conditions to ensure trend-follow fires
         df.iloc[-1, df.columns.get_loc("rsi")] = 50.0
         df.iloc[-1, df.columns.get_loc("volume_ratio")] = 0.5
@@ -148,16 +154,22 @@ class TestSignalGeneration:
 
     def test_trend_follow_short_on_death_cross(self):
         s = Strategy(Config())
+        s.config.strategy.trend_follow_enabled = True
         df = _df_with_indicators()
+        # Add TF-specific EMA columns
+        df["tf_ema_fast"] = df["ema_fast"]
+        df["tf_ema_slow"] = df["ema_slow"]
+        df["prev_tf_ema_fast"] = df["tf_ema_fast"].shift(1)
+        df["prev_tf_ema_slow"] = df["tf_ema_slow"].shift(1)
         close_val = df.iloc[-1]["close"]
-        # Force EMA death cross + MACD negative + ADX strong
-        df.iloc[-1, df.columns.get_loc("ema_fast")] = 95.0
-        df.iloc[-1, df.columns.get_loc("ema_slow")] = 100.0
-        df.iloc[-1, df.columns.get_loc("prev_ema_fast")] = 101.0  # was above
-        df.iloc[-1, df.columns.get_loc("prev_ema_slow")] = 100.0
+        # Force TF EMA death cross + MACD negative + ADX strong
+        df.iloc[-1, df.columns.get_loc("tf_ema_fast")] = 95.0
+        df.iloc[-1, df.columns.get_loc("tf_ema_slow")] = 100.0
+        df.iloc[-1, df.columns.get_loc("prev_tf_ema_fast")] = 101.0  # was above
+        df.iloc[-1, df.columns.get_loc("prev_tf_ema_slow")] = 100.0
         df.iloc[-1, df.columns.get_loc("macd_hist")] = -0.5
         df.iloc[-1, df.columns.get_loc("macd")] = -1.0  # MACD below zero
-        df.iloc[-1, df.columns.get_loc("adx")] = 25.0
+        df.iloc[-1, df.columns.get_loc("adx")] = 36.0
         # Macro trend bearish: ema_long above price
         df.iloc[-1, df.columns.get_loc("ema_long")] = close_val + 10
         # Clear MR/MOM conditions
@@ -318,24 +330,24 @@ class TestVolatilityAdaptiveCooldown:
         s = Strategy(Config())
         s.set_candle_index(0)
         s.record_trade("BTC/USDT")
-        # ATR/price = 1% < threshold (3%), so base cooldown=6
-        s.set_candle_index(6)
+        # ATR/price = 1% < threshold (3%), so base cooldown=24
+        s.set_candle_index(24)
         assert s._cooldown_ok("BTC/USDT", atr_pct=0.01)
 
     def test_high_volatility_extends_cooldown(self):
         s = Strategy(Config())
         s.set_candle_index(0)
         s.record_trade("AVAX/USDT")
-        # ATR/price = 6% > threshold 3%, multiplier=2x, effective=12
-        s.set_candle_index(6)
-        assert not s._cooldown_ok("AVAX/USDT", atr_pct=0.06)  # 6 < 12
+        # ATR/price = 6% > threshold 3%, multiplier=2x, effective=48
+        s.set_candle_index(24)
+        assert not s._cooldown_ok("AVAX/USDT", atr_pct=0.06)  # 24 < 48
 
     def test_high_volatility_allows_after_extended(self):
         s = Strategy(Config())
         s.set_candle_index(0)
         s.record_trade("AVAX/USDT")
-        # ATR/price = 6%, multiplier=2x, effective=12
-        s.set_candle_index(12)
+        # ATR/price = 6%, multiplier=2x, effective=48
+        s.set_candle_index(48)
         assert s._cooldown_ok("AVAX/USDT", atr_pct=0.06)
 
     def test_no_previous_trade_always_ok(self):
@@ -379,7 +391,7 @@ class TestBreakoutModule:
     def test_breakout_long_above_range(self):
         s = Strategy(Config())
         df = self._breakout_df(n=250)
-        # Set breakout lookback to something we can test
+        s.config.strategy.breakout_enabled = True
         s.config.strategy.breakout_lookback = 50
         # Force price above 50-candle range high
         window = df.iloc[-51:-1]
@@ -397,6 +409,7 @@ class TestBreakoutModule:
     def test_breakout_short_below_range(self):
         s = Strategy(Config())
         df = self._breakout_df(n=250)
+        s.config.strategy.breakout_enabled = True
         s.config.strategy.breakout_lookback = 50
         s.config.strategy.breakout_max_range_pct = 0.50  # relax for test data
         # Force price below 50-candle range low

@@ -303,6 +303,7 @@ def main():
 
     # ── params used ──────────────────────────────────────────────
     print(f"\nParameters used:")
+    print(f"  Leverage:         {config.exchange.leverage}x ({config.exchange.market_type})")
     print(f"  Risk/trade:       {config.risk.max_risk_per_trade:.0%}")
     print(f"  Max positions:    {config.risk.max_concurrent_positions}")
     print(f"  RSI oversold:     {config.strategy.rsi_oversold}")

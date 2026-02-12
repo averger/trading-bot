@@ -141,7 +141,7 @@ class Strategy:
             if atr_pct > self.config.strategy.max_atr_pct:
                 return self._no_signal(regime, price, atr)
 
-            # mean reversion (RANGING)
+            # mean reversion (RANGING only)
             if regime == Regime.RANGING:
                 sig = self._mean_reversion_entry(last, regime, price, atr)
                 if sig.signal != Signal.NO_SIGNAL:
@@ -155,7 +155,7 @@ class Strategy:
                             return sig
 
             # momentum (TRENDING)
-            if regime == Regime.TRENDING:
+            if regime == Regime.TRENDING and self.config.strategy.momentum_enabled:
                 allowed = self.config.strategy.momentum_symbols
                 if not allowed or symbol in allowed:
                     sig = self._momentum_entry(last, regime, price, atr)
@@ -274,11 +274,16 @@ class Strategy:
         ema_fast = last["ema_fast"]
         ema_slow = last["ema_slow"]
 
+        vol_ratio = last["volume_ratio"]
+        macd_hist = last.get("macd_hist", np.nan)
+
         if (
             price > bb_upper
             and sc.rsi_momentum_min < rsi < sc.rsi_momentum_max
             and ema_fast > ema_slow
             and price > ema_slow
+            and not pd.isna(macd_hist) and macd_hist > 0  # MACD confirms momentum
+            and vol_ratio > sc.momentum_volume_min        # volume confirms
         ):
             stop = price - rc.momentum_sl_atr * atr
             return TradeSignal(
@@ -344,10 +349,11 @@ class Strategy:
         sc = self.config.strategy
         rc = self.config.risk
 
-        ema_fast = last["ema_fast"]
-        ema_slow = last["ema_slow"]
-        prev_ema_fast = last.get("prev_ema_fast", np.nan)
-        prev_ema_slow = last.get("prev_ema_slow", np.nan)
+        # Use TF-specific longer EMAs for fewer, stronger crosses
+        ema_fast = last.get("tf_ema_fast", last["ema_fast"])
+        ema_slow = last.get("tf_ema_slow", last["ema_slow"])
+        prev_ema_fast = last.get("prev_tf_ema_fast", last.get("prev_ema_fast", np.nan))
+        prev_ema_slow = last.get("prev_tf_ema_slow", last.get("prev_ema_slow", np.nan))
         macd_hist = last.get("macd_hist", np.nan)
         adx = last["adx"]
 
@@ -357,7 +363,7 @@ class Strategy:
         if pd.isna(adx) or adx < sc.trend_follow_adx_min:
             return self._no_signal(regime, price, atr)
 
-        # LONG: EMA golden cross + MACD histogram > 0
+        # LONG: EMA(21) crosses above EMA(50) + MACD histogram > 0
         if (
             prev_ema_fast <= prev_ema_slow
             and ema_fast > ema_slow
@@ -371,7 +377,7 @@ class Strategy:
                 price=price,
                 atr=atr,
                 stop_loss=stop,
-                reason=f"TF LONG: EMA golden cross MACD={macd_hist:.4f}",
+                reason=f"TF LONG: EMA({self.config.indicators.tf_ema_fast}/{self.config.indicators.tf_ema_slow}) golden cross",
             )
 
         # SHORT: EMA death cross + MACD histogram < 0 + price confirms bearish
@@ -382,7 +388,7 @@ class Strategy:
             and macd_hist < 0
             and price < ema_slow  # price must confirm bearish trend
             and not pd.isna(macd) and macd < 0  # macro MACD below zero
-            and self._short_trend_ok(last, price)  # price below EMA(200)
+            and self._short_trend_ok(last, price)  # price below EMA(720)
         ):
             stop = price + rc.trend_follow_sl_atr * atr
             return TradeSignal(
@@ -392,7 +398,7 @@ class Strategy:
                 price=price,
                 atr=atr,
                 stop_loss=stop,
-                reason=f"TF SHORT: EMA death cross MACD={macd_hist:.4f}",
+                reason=f"TF SHORT: EMA({self.config.indicators.tf_ema_fast}/{self.config.indicators.tf_ema_slow}) death cross",
             )
 
         return self._no_signal(regime, price, atr)

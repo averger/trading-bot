@@ -155,6 +155,11 @@ class Backtester:
         # Previous candle EMAs for crossover detection
         df["prev_ema_fast"] = df["ema_fast"].shift(1)
         df["prev_ema_slow"] = df["ema_slow"].shift(1)
+        # Trend-follow specific EMAs (longer periods for fewer, stronger crosses)
+        df["tf_ema_fast"] = compute_ema(df["close"], ic.tf_ema_fast)
+        df["tf_ema_slow"] = compute_ema(df["close"], ic.tf_ema_slow)
+        df["prev_tf_ema_fast"] = df["tf_ema_fast"].shift(1)
+        df["prev_tf_ema_slow"] = df["tf_ema_slow"].shift(1)
         return df
 
     def _compute_htf_bias(self, df: pd.DataFrame) -> pd.Series:
@@ -223,6 +228,7 @@ class Backtester:
                 self.config.indicators.ema_slow,
                 self.config.indicators.ema_long,
                 self.config.indicators.macd_slow,
+                self.config.indicators.tf_ema_slow,
                 self.config.strategy.breakout_lookback if self.config.strategy.breakout_enabled else 0,
             )
             + 5
@@ -242,6 +248,31 @@ class Backtester:
             # -- manage open position -----------------------------------
             if pos is not None:
                 candles_held += 1
+                leverage = self.config.exchange.leverage
+
+                # Funding cost every 8h (= every 8 candles on 1h timeframe)
+                if leverage > 1 and candles_held % 8 == 0:
+                    funding_cost = pos.size * price * rc.funding_rate_8h
+                    partial_pnl_accum -= funding_cost
+                    balance -= funding_cost
+
+                # Liquidation check: if unrealized loss exceeds margin
+                if leverage > 1:
+                    notional = pos.size * pos.entry_price
+                    margin = notional / leverage
+                    unreal = self._unrealized(pos, price)
+                    if unreal < -margin * 0.9:  # 90% of margin gone = liquidation
+                        reason = f"LIQUIDATED (loss>${margin:.2f} margin)"
+                        if pos.side == "long":
+                            self._close_long(pos, i, price, reason, rc)
+                        else:
+                            self._close_short(pos, i, price, reason, rc)
+                        pos.pnl += partial_pnl_accum
+                        balance += pos.pnl
+                        result.trades.append(pos)
+                        pos, trailing, candles_held, partial_pnl_accum = None, False, 0, 0.0
+                        result.equity_curve.append(balance)
+                        continue
 
                 if pos.side == "long":
                     if price > highest:
@@ -422,6 +453,7 @@ class Backtester:
     # -- helpers --------------------------------------------------------
 
     def _open_position(self, sig, i, price, atr, balance, peak, rc, side):
+        leverage = self.config.exchange.leverage
         risk_amt = balance * rc.max_risk_per_trade
         if peak > 0 and (1 - balance / peak) >= rc.max_drawdown_reduce:
             risk_amt *= 0.5
@@ -429,13 +461,14 @@ class Backtester:
         if sd <= 0:
             return None
         size = risk_amt / sd
-        cost = size * price
-        fee = cost * rc.fee_pct
+        notional = size * price
+        margin = notional / leverage  # leverage reduces margin required
+        fee = notional * rc.fee_pct
         if side == "long":
             entry = price * (1 + rc.slippage_pct)
         else:
             entry = price * (1 - rc.slippage_pct)
-        if cost + fee <= balance:
+        if margin + fee <= balance:
             return BTTrade(
                 entry_idx=i,
                 entry_price=entry,

@@ -11,8 +11,8 @@ class ExchangeConfig:
     api_key: str = ""
     api_secret: str = ""
     testnet: bool = True
-    market_type: str = "spot"       # "spot" or "futures"
-    leverage: int = 1               # 1x = no leverage
+    market_type: str = "futures"    # "spot" or "futures"
+    leverage: int = 2               # 2x leverage on futures
 
 
 @dataclass
@@ -38,6 +38,8 @@ class IndicatorConfig:
     macd_fast: int = 12
     macd_slow: int = 26
     macd_signal: int = 9
+    tf_ema_fast: int = 50          # trend-follow uses long EMAs
+    tf_ema_slow: int = 200         # EMA(50)/EMA(200) = only major trend changes
 
 
 @dataclass
@@ -51,17 +53,18 @@ class StrategyConfig:
     rsi_exit: float = 50.0
     volume_spike_multiplier: float = 1.0
     # Momentum breakout
-    rsi_momentum_min: float = 55.0
-    rsi_momentum_max: float = 80.0
+    rsi_momentum_min: float = 60.0
+    rsi_momentum_max: float = 75.0
     # Anti-noise filters
-    cooldown_candles: int = 6            # min candles between trades per symbol
+    cooldown_candles: int = 24           # min 24h between trades per symbol
     max_atr_pct: float = 0.06           # skip when ATR/price > 6%
     momentum_volume_min: float = 1.2    # momentum needs above-average volume
-    # Momentum for all pairs (empty = all allowed)
+    # Momentum module (empty = all allowed, ["DISABLED"] = none)
+    momentum_enabled: bool = False
     momentum_symbols: list = field(default_factory=list)
     # Trend-following module
-    trend_follow_adx_min: float = 25.0  # stronger trend required
-    trend_follow_enabled: bool = True
+    trend_follow_adx_min: float = 35.0  # very strong trends only
+    trend_follow_enabled: bool = False
     # Volatility-adaptive cooldown
     cooldown_vol_threshold: float = 0.03  # when ATR/price > 3%, scale cooldown up
     # Higher-timeframe filter
@@ -70,11 +73,11 @@ class StrategyConfig:
     htf_ema_fast: int = 9               # ~1.5 days on 4h
     htf_ema_slow: int = 21              # ~3.5 days on 4h
     # Range breakout module
-    breakout_enabled: bool = True
+    breakout_enabled: bool = False
     breakout_lookback: int = 336        # 336h = 14 days
-    breakout_volume_min: float = 1.5    # need above-average volume for breakout
+    breakout_volume_min: float = 1.0    # average volume enough (BTC has steady volume)
     breakout_sl_atr: float = 2.5        # wider stop for breakout trades
-    breakout_max_range_pct: float = 0.15  # range must be < 15% of price (consolidation)
+    breakout_max_range_pct: float = 0.20  # range must be < 20% of price (consolidation)
 
 
 @dataclass
@@ -94,6 +97,7 @@ class RiskConfig:
     time_stop_min_move: float = 0.005        # minimum 0.5% move
     slippage_pct: float = 0.0005             # 0.05% assumed slippage
     fee_pct: float = 0.001                   # 0.10% per side
+    funding_rate_8h: float = 0.0001          # 0.01% per 8h (futures only)
     # Partial take-profit
     partial_tp_enabled: bool = True
     partial_tp_ratio: float = 2.0            # TP at 2x risk distance
