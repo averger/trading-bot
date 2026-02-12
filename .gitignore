@@ -1,0 +1,31 @@
+# Secrets — NEVER commit
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Data & logs
+*.db
+*.sqlite
+*.log
+data/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Windows artifacts
+nul
