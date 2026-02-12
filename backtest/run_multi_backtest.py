@@ -9,15 +9,13 @@ import logging
 import argparse
 import time as _time
 from datetime import datetime, timezone, timedelta
-from dataclasses import dataclass
 
 import ccxt
 import pandas as pd
 import numpy as np
 
-from config.settings import Config, StrategyConfig, RiskConfig
+from config.settings import Config
 from backtest.backtester import Backtester
-from src.sentiment import SentimentAnalyzer
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("multi_backtest")
@@ -70,10 +68,9 @@ def fetch_history(
 
 def run_single(
     symbol: str, df: pd.DataFrame, config: Config, capital: float,
-    fng_history: dict[str, int] | None = None,
 ) -> dict:
     bt = Backtester(config)
-    result = bt.run(df, initial_capital=capital, symbol=symbol, fng_history=fng_history)
+    result = bt.run(df, initial_capital=capital, symbol=symbol)
     final = result.equity_curve[-1] if result.equity_curve else capital
     return {
         "symbol": symbol,
@@ -87,6 +84,8 @@ def run_single(
         "sharpe": result.sharpe_ratio,
         "final_equity": final,
         "asset_return": (df["close"].iloc[-1] / df["close"].iloc[0] - 1) * 100,
+        "exposure": result.market_exposure_pct,
+        "avg_hold": result.avg_hold_candles,
         "result": result,
     }
 
@@ -101,16 +100,16 @@ def optimize_params(
 
     # Parameter grid
     rsi_oversold_values = [30, 33, 35, 38]
-    rsi_overbought_values = [65, 68, 70, 73]
-    volume_spike_values = [1.0, 1.2, 1.5]
-    adx_trend_values = [23, 25, 28]
+    rsi_overbought_values = [62, 65, 68, 70]
+    volume_spike_values = [0.8, 1.0, 1.2]
+    cooldown_values = [4, 6, 8, 12]
 
     best_score = -999
     best_params = {}
     best_config = Config()
     total_combos = (
         len(rsi_oversold_values) * len(rsi_overbought_values)
-        * len(volume_spike_values) * len(adx_trend_values)
+        * len(volume_spike_values) * len(cooldown_values)
     )
     log.info("Testing %d parameter combinations...", total_combos)
 
@@ -131,13 +130,13 @@ def optimize_params(
     for rsi_os in rsi_oversold_values:
         for rsi_ob in rsi_overbought_values:
             for vol_sp in volume_spike_values:
-                for adx_t in adx_trend_values:
+                for cd in cooldown_values:
                     combo_num += 1
                     config = Config()
                     config.strategy.rsi_oversold = float(rsi_os)
                     config.strategy.rsi_overbought = float(rsi_ob)
                     config.strategy.volume_spike_multiplier = float(vol_sp)
-                    config.strategy.adx_trending_threshold = float(adx_t)
+                    config.strategy.cooldown_candles = cd
 
                     # Score across all symbols on in-sample data
                     total_return = 0
@@ -155,7 +154,7 @@ def optimize_params(
 
                     # Score = return - 2*drawdown (penalize risk)
                     score = total_return - 2 * total_dd
-                    if total_trades < 5:
+                    if total_trades < 10:
                         score -= 50  # penalize too few trades
 
                     if score > best_score:
@@ -164,7 +163,7 @@ def optimize_params(
                             "rsi_oversold": rsi_os,
                             "rsi_overbought": rsi_ob,
                             "volume_spike": vol_sp,
-                            "adx_trending": adx_t,
+                            "cooldown": cd,
                         }
                         best_config = config
 
@@ -222,13 +221,6 @@ def main():
 
     config.trading.timeframe = args.timeframe
 
-    # ── fetch Fear & Greed history ────────────────────────────────
-    fng_history: dict[str, int] = {}
-    if config.sentiment.fear_greed_enabled:
-        log.info("Fetching Fear & Greed Index history...")
-        fng_history = SentimentAnalyzer.fetch_fear_greed_history(days=args.days + 60)
-        log.info("  -> %d days of F&G data", len(fng_history))
-
     # ── run full backtests ───────────────────────────────────────
     log.info("")
     log.info("=" * 70)
@@ -237,7 +229,7 @@ def main():
 
     results = []
     for sym, df in datasets.items():
-        r = run_single(sym, df, config, args.capital, fng_history=fng_history)
+        r = run_single(sym, df, config, args.capital)
         results.append(r)
 
     # ── summary table ────────────────────────────────────────────
@@ -248,10 +240,10 @@ def main():
     hdr = (
         f"{'Pair':<12} {'Period':<25} {'Trades':>6} {'WR':>6} "
         f"{'Return':>8} {'MaxDD':>7} {'PF':>6} {'Sharpe':>7} "
-        f"{'Final$':>8} {'Asset%':>8}"
+        f"{'Final$':>8} {'Hold%':>7} {'Expo%':>6} {'AvgH':>5}"
     )
     print(hdr)
-    print("-" * 95)
+    print("-" * 105)
 
     total_pnl = 0
     for r in results:
@@ -260,11 +252,12 @@ def main():
             f"{r['symbol']:<12} {r['period']:<25} {r['trades']:>6} "
             f"{r['win_rate']:>5.0%} {r['return_pct']:>+7.2f}% "
             f"{r['max_dd_pct']:>6.2f}% {pf_str:>6} {r['sharpe']:>7.2f} "
-            f"{r['final_equity']:>7.2f}$ {r['asset_return']:>+7.1f}%"
+            f"{r['final_equity']:>7.2f}$ {r['asset_return']:>+6.1f}% "
+            f"{r['exposure']:>5.1f}% {r['avg_hold']:>4.0f}h"
         )
         total_pnl += r["final_equity"] - args.capital
 
-    print("-" * 95)
+    print("-" * 105)
     total_invested = args.capital * len(results)
     total_final = total_invested + total_pnl
     print(
@@ -273,7 +266,7 @@ def main():
         f"{'':>7} {'':>6} {'':>7} "
         f"{total_final:>7.2f}$"
     )
-    print("=" * 95)
+    print("=" * 105)
 
     # ── per-pair detail ──────────────────────────────────────────
     print("\n\nDETAILED TRADE LOG PER PAIR:")
@@ -284,22 +277,14 @@ def main():
         longs = [t for t in res.trades if t.side == "long"]
         shorts = [t for t in res.trades if t.side == "short"]
         print(f"\n--- {r['symbol']} ({res.total_trades} trades: {len(longs)}L / {len(shorts)}S) ---")
-        # Show win/loss breakdown by module
-        for mod_name in ["mean_reversion", "momentum", "trend_follow", "breakout"]:
-            mod_trades = [t for t in res.trades if t.module == mod_name]
-            if not mod_trades:
-                continue
-            mod_longs = [t for t in mod_trades if t.side == "long"]
-            mod_shorts = [t for t in mod_trades if t.side == "short"]
-            wins = sum(1 for t in mod_trades if t.pnl > 0)
-            pnl = sum(t.pnl for t in mod_trades)
-            label = {"mean_reversion": "MeanRev", "momentum": "Momentum", "trend_follow": "TrendFol", "breakout": "Breakout"}[mod_name]
-            print(
-                f"  {label:>10}: {len(mod_trades):3d} trades "
-                f"({len(mod_longs)}L/{len(mod_shorts)}S), "
-                f"{wins}W/{len(mod_trades)-wins}L, "
-                f"PnL=${pnl:.2f}"
-            )
+        wins = sum(1 for t in res.trades if t.pnl > 0)
+        pnl = sum(t.pnl for t in res.trades)
+        print(
+            f"  {'MeanRev':>10}: {res.total_trades:3d} trades "
+            f"({len(longs)}L/{len(shorts)}S), "
+            f"{wins}W/{res.total_trades-wins}L, "
+            f"PnL=${pnl:.2f}"
+        )
 
     # ── params used ──────────────────────────────────────────────
     print(f"\nParameters used:")
@@ -309,22 +294,11 @@ def main():
     print(f"  RSI oversold:     {config.strategy.rsi_oversold}")
     print(f"  RSI overbought:   {config.strategy.rsi_overbought}")
     print(f"  Volume spike:     {config.strategy.volume_spike_multiplier}")
-    print(f"  ADX trending:     {config.strategy.adx_trending_threshold}")
-    print(f"  SL ATR (MR/MOM/TF): {config.risk.mean_reversion_sl_atr} / {config.risk.momentum_sl_atr} / {config.risk.trend_follow_sl_atr}")
+    print(f"  SL ATR:           {config.risk.mean_reversion_sl_atr}")
     print(f"  Cooldown:         {config.strategy.cooldown_candles} candles")
     print(f"  Partial TP:       {config.risk.partial_tp_enabled} ({config.risk.partial_tp_ratio}x, {config.risk.partial_tp_size:.0%})")
-    print(f"  Trend-follow:     {config.strategy.trend_follow_enabled}")
-    print(f"  Breakout:         {config.strategy.breakout_enabled}"
-          f" (lookback={config.strategy.breakout_lookback}h,"
-          f" vol>={config.strategy.breakout_volume_min},"
-          f" range<{config.strategy.breakout_max_range_pct:.0%})")
-    print(f"  Vol cooldown:     threshold={config.strategy.cooldown_vol_threshold:.0%}")
-    print(f"  Mom short SL:     {config.risk.momentum_short_sl_atr}x ATR")
-    print(f"  Sentiment F&G:    {config.sentiment.fear_greed_enabled}"
-          f" (fear<={config.sentiment.extreme_fear_threshold} blocks shorts,"
-          f" greed>={config.sentiment.extreme_greed_threshold} blocks longs)")
-    if fng_history:
-        print(f"  F&G data points:  {len(fng_history)} days")
+    print(f"  EMA short filter: {config.indicators.ema_short_filter} (shorts: price < EMA)")
+    print(f"  EMA long filter:  {config.indicators.ema_long_filter} (longs: price > EMA)")
 
 
 if __name__ == "__main__":

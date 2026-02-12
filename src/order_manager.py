@@ -22,7 +22,7 @@ class Position:
     entry_time: datetime
     stop_loss: float
     module: str
-    regime: str
+    regime: str = ""
     trade_id: int
     highest_price: float = 0.0
     lowest_price: float = float("inf")
@@ -136,7 +136,7 @@ class OrderManager:
             symbol=symbol,
             side=side,
             module=signal.module,
-            regime=signal.regime.value,
+            regime="",
             entry_price=fill_price,
             size=size,
             entry_time=now,
@@ -150,7 +150,7 @@ class OrderManager:
             entry_time=now,
             stop_loss=signal.stop_loss,
             module=signal.module,
-            regime=signal.regime.value,
+            regime="",
             trade_id=trade_id,
             highest_price=fill_price,
             lowest_price=fill_price,

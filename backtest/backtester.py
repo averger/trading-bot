@@ -11,13 +11,10 @@ from src.indicators import (
     compute_rsi,
     compute_bollinger_bands,
     compute_atr,
-    compute_adx,
     compute_ema,
     compute_volume_ma,
-    compute_macd,
 )
 from src.strategy import Strategy, Signal
-from src.sentiment import SentimentAnalyzer
 
 log = logging.getLogger(__name__)
 
@@ -31,7 +28,6 @@ class BTTrade:
     size: float
     stop_loss: float
     module: str
-    regime: str
     side: str = "long"
     exit_idx: int = 0
     exit_price: float = 0.0
@@ -104,6 +100,20 @@ class BacktestResult:
             return 0
         return float((rets.mean() / rets.std()) * np.sqrt(8760))
 
+    @property
+    def market_exposure_pct(self) -> float:
+        if not self.trades:
+            return 0
+        candles_in = sum(t.exit_idx - t.entry_idx for t in self.trades)
+        total = len(self.equity_curve) if self.equity_curve else 1
+        return (candles_in / total) * 100
+
+    @property
+    def avg_hold_candles(self) -> float:
+        if not self.trades:
+            return 0
+        return sum(t.exit_idx - t.entry_idx for t in self.trades) / len(self.trades)
+
     def summary(self) -> str:
         final = self.equity_curve[-1] if self.equity_curve else self.initial_capital
         longs = [t for t in self.trades if t.side == "long"]
@@ -122,6 +132,8 @@ class BacktestResult:
             f"  (L:{len(longs)} S:{len(shorts)})\n"
             f"  Win rate        : {self.win_rate:.1%}"
             f"  ({self.wins}W / {self.losses}L)\n"
+            f"  Market exposure : {self.market_exposure_pct:.1f}%\n"
+            f"  Avg hold        : {self.avg_hold_candles:.0f} candles\n"
             f"  Total PnL       : ${self.total_pnl:.2f}\n"
             f"{'='*50}\n"
         )
@@ -142,75 +154,21 @@ class Backtester:
             compute_bollinger_bands(df["close"], ic.bb_period, ic.bb_std)
         )
         df["atr"] = compute_atr(df["high"], df["low"], df["close"], ic.atr_period)
-        df["adx"] = compute_adx(df["high"], df["low"], df["close"], ic.adx_period)
-        df["ema_fast"] = compute_ema(df["close"], ic.ema_fast)
-        df["ema_slow"] = compute_ema(df["close"], ic.ema_slow)
-        df["ema_long"] = compute_ema(df["close"], ic.ema_long)
+        df["ema_short_filter"] = compute_ema(df["close"], ic.ema_short_filter)
+        df["ema_long_filter"] = compute_ema(df["close"], ic.ema_long_filter)
         df["volume_ma"] = compute_volume_ma(df["volume"], ic.volume_ma_period)
         df["volume_ratio"] = df["volume"] / df["volume_ma"]
-        # MACD
-        df["macd"], df["macd_signal"], df["macd_hist"] = compute_macd(
-            df["close"], ic.macd_fast, ic.macd_slow, ic.macd_signal,
-        )
-        # Previous candle EMAs for crossover detection
-        df["prev_ema_fast"] = df["ema_fast"].shift(1)
-        df["prev_ema_slow"] = df["ema_slow"].shift(1)
-        # Trend-follow specific EMAs (longer periods for fewer, stronger crosses)
-        df["tf_ema_fast"] = compute_ema(df["close"], ic.tf_ema_fast)
-        df["tf_ema_slow"] = compute_ema(df["close"], ic.tf_ema_slow)
-        df["prev_tf_ema_fast"] = df["tf_ema_fast"].shift(1)
-        df["prev_tf_ema_slow"] = df["tf_ema_slow"].shift(1)
+        df["ema_trend_fast"] = compute_ema(df["close"], ic.trend_ema_fast)
+        df["ema_trend_slow"] = compute_ema(df["close"], ic.trend_ema_slow)
         return df
-
-    def _compute_htf_bias(self, df: pd.DataFrame) -> pd.Series:
-        """Resample 1h data to 4h and compute trend bias per 1h candle.
-
-        Returns a Series aligned to df.index with values:
-          1 = bullish (4h EMA fast > slow, close > slow)
-         -1 = bearish (4h EMA fast < slow, close < slow)
-          0 = neutral
-        Uses the *previous completed* 4h bar to avoid look-ahead.
-        """
-        sc = self.config.strategy
-        tf = sc.htf_timeframe  # e.g. "4h"
-
-        df_htf = df.resample(tf).agg({
-            "open": "first", "high": "max", "low": "min",
-            "close": "last", "volume": "sum",
-        }).dropna()
-
-        if len(df_htf) < sc.htf_ema_slow + 2:
-            return pd.Series(0, index=df.index, dtype=int)
-
-        ema_f = compute_ema(df_htf["close"], sc.htf_ema_fast)
-        ema_s = compute_ema(df_htf["close"], sc.htf_ema_slow)
-
-        bias_htf = pd.Series(0, index=df_htf.index, dtype=int)
-        bias_htf[(ema_f > ema_s) & (df_htf["close"] > ema_s)] = 1
-        bias_htf[(ema_f < ema_s) & (df_htf["close"] < ema_s)] = -1
-
-        # Shift by 1 to use previous completed bar (no look-ahead)
-        bias_htf = bias_htf.shift(1).fillna(0).astype(int)
-
-        # Map back to 1h via forward-fill
-        bias_1h = bias_htf.reindex(df.index, method="ffill").fillna(0).astype(int)
-        return bias_1h
 
     def run(
         self, df: pd.DataFrame, initial_capital: float = 100.0,
-        symbol: str = "", fng_history: dict[str, int] | None = None,
+        symbol: str = "",
     ) -> BacktestResult:
         df = self.add_indicators(df)
         rc = self.config.risk
         result = BacktestResult(initial_capital=initial_capital)
-
-        # Build date -> F&G mapping from candle index
-        _fng = fng_history or {}
-
-        # HTF bias (resample 1h -> 4h)
-        htf_bias_series = pd.Series(0, index=df.index, dtype=int)
-        if self.config.strategy.htf_enabled:
-            htf_bias_series = self._compute_htf_bias(df)
 
         balance = initial_capital
         peak = initial_capital
@@ -219,20 +177,18 @@ class Backtester:
         lowest = float("inf")
         trailing = False
         candles_held = 0
-        partial_pnl_accum = 0.0  # track partial TP PnL separately
+        partial_pnl_accum = 0.0
 
-        warmup = (
-            max(
-                self.config.indicators.bb_period,
-                self.config.indicators.adx_period * 2,
-                self.config.indicators.ema_slow,
-                self.config.indicators.ema_long,
-                self.config.indicators.macd_slow,
-                self.config.indicators.tf_ema_slow,
-                self.config.strategy.breakout_lookback if self.config.strategy.breakout_enabled else 0,
-            )
-            + 5
-        )
+        warmup_vals = [
+            self.config.indicators.bb_period,
+            self.config.indicators.atr_period,
+            self.config.indicators.ema_long_filter,
+            self.config.indicators.volume_ma_period,
+        ]
+        if self.config.strategy.trend_enabled:
+            # Use fast EMA for warmup — slow EMA converges enough for crossover
+            warmup_vals.append(self.config.indicators.trend_ema_fast)
+        warmup = max(warmup_vals) + 5
 
         for i in range(warmup, len(df)):
             cur = df.iloc[i]
@@ -261,7 +217,7 @@ class Backtester:
                     notional = pos.size * pos.entry_price
                     margin = notional / leverage
                     unreal = self._unrealized(pos, price)
-                    if unreal < -margin * 0.9:  # 90% of margin gone = liquidation
+                    if unreal < -margin * 0.9:
                         reason = f"LIQUIDATED (loss>${margin:.2f} margin)"
                         if pos.side == "long":
                             self._close_long(pos, i, price, reason, rc)
@@ -288,27 +244,28 @@ class Backtester:
                         result.equity_curve.append(balance)
                         continue
 
-                    # partial take-profit
-                    if rc.partial_tp_enabled and not pos.partial_taken and pos.initial_stop > 0:
-                        risk_dist = abs(pos.entry_price - pos.initial_stop)
-                        tp_price = pos.entry_price + rc.partial_tp_ratio * risk_dist
-                        if price >= tp_price and risk_dist > 0:
-                            close_size = pos.original_size * rc.partial_tp_size
-                            ptp = (price - pos.entry_price) * close_size
-                            fees = (pos.entry_price * close_size + price * close_size) * rc.fee_pct
-                            partial_pnl_accum += ptp - fees
-                            balance += ptp - fees
-                            pos.size -= close_size
-                            pos.partial_taken = True
+                    if pos.module != "trend":
+                        # partial take-profit (MR only)
+                        if rc.partial_tp_enabled and not pos.partial_taken and pos.initial_stop > 0:
+                            risk_dist = abs(pos.entry_price - pos.initial_stop)
+                            tp_price = pos.entry_price + rc.partial_tp_ratio * risk_dist
+                            if price >= tp_price and risk_dist > 0:
+                                close_size = pos.original_size * rc.partial_tp_size
+                                ptp = (price - pos.entry_price) * close_size
+                                fees = (pos.entry_price * close_size + price * close_size) * rc.fee_pct
+                                partial_pnl_accum += ptp - fees
+                                balance += ptp - fees
+                                pos.size -= close_size
+                                pos.partial_taken = True
 
-                    # trailing activation
-                    pct = (price - pos.entry_price) / pos.entry_price
-                    if pct >= rc.trailing_activation_pct:
-                        trailing = True
-                    if trailing and atr > 0:
-                        ns = highest - rc.trailing_atr_multiplier * atr
-                        if ns > pos.stop_loss:
-                            pos.stop_loss = ns
+                        # trailing activation (MR only)
+                        pct = (price - pos.entry_price) / pos.entry_price
+                        if pct >= rc.trailing_activation_pct:
+                            trailing = True
+                        if trailing and atr > 0:
+                            ns = highest - rc.trailing_atr_multiplier * atr
+                            if ns > pos.stop_loss:
+                                pos.stop_loss = ns
 
                 else:  # SHORT
                     if price < lowest:
@@ -346,8 +303,8 @@ class Backtester:
                         if ns < pos.stop_loss:
                             pos.stop_loss = ns
 
-                # time stop (both sides)
-                if candles_held >= rc.time_stop_candles:
+                # time stop (MR only — trend positions hold until death cross)
+                if pos.module != "trend" and candles_held >= rc.time_stop_candles:
                     move = abs(price - pos.entry_price) / pos.entry_price
                     if move < rc.time_stop_min_move:
                         if pos.side == "long":
@@ -367,23 +324,9 @@ class Backtester:
             pos_module = pos.module if pos is not None else ""
             pos_side = pos.side if pos is not None else "long"
 
-            # Look up Fear & Greed for this candle's date
-            fng_val = -1
-            if _fng and hasattr(cur, "name") and cur.name is not None:
-                date_str = str(cur.name)[:10]  # YYYY-MM-DD
-                fng_val = _fng.get(date_str, -1)
-            elif _fng and "timestamp" in df.columns:
-                ts = cur.get("timestamp", None)
-                if ts is not None:
-                    date_str = pd.Timestamp(ts, unit="ms").strftime("%Y-%m-%d")
-                    fng_val = _fng.get(date_str, -1)
-
-            htf_val = int(htf_bias_series.iloc[i])
-
             sig = self.strategy.generate_signal(
                 window, pos is not None, symbol,
                 position_module=pos_module, position_side=pos_side,
-                fear_greed=fng_val, htf_bias=htf_val,
             )
 
             # LONG EXIT
@@ -454,15 +397,35 @@ class Backtester:
 
     def _open_position(self, sig, i, price, atr, balance, peak, rc, side):
         leverage = self.config.exchange.leverage
-        risk_amt = balance * rc.max_risk_per_trade
-        if peak > 0 and (1 - balance / peak) >= rc.max_drawdown_reduce:
-            risk_amt *= 0.5
-        sd = abs(price - sig.stop_loss)
-        if sd <= 0:
-            return None
-        size = risk_amt / sd
-        notional = size * price
-        margin = notional / leverage  # leverage reduces margin required
+
+        # Trend positions: capital allocation sizing
+        if sig.module == "trend" and getattr(rc, 'trend_alloc_pct', 0) > 0:
+            alloc = balance * rc.trend_alloc_pct
+            if peak > 0 and (1 - balance / peak) >= rc.max_drawdown_reduce:
+                alloc *= 0.5
+            size = (alloc / price) * leverage
+            notional = size * price
+            margin = notional / leverage
+        elif getattr(rc, 'capital_alloc_pct', 0) > 0:
+            # Legacy capital allocation mode
+            alloc = balance * rc.capital_alloc_pct
+            if peak > 0 and (1 - balance / peak) >= rc.max_drawdown_reduce:
+                alloc *= 0.5
+            size = (alloc / price) * leverage
+            notional = size * price
+            margin = notional / leverage
+        else:
+            # Risk-based sizing (MR positions)
+            risk_amt = balance * rc.max_risk_per_trade
+            if peak > 0 and (1 - balance / peak) >= rc.max_drawdown_reduce:
+                risk_amt *= 0.5
+            sd = abs(price - sig.stop_loss)
+            if sd <= 0:
+                return None
+            size = risk_amt / sd
+            notional = size * price
+            margin = notional / leverage
+
         fee = notional * rc.fee_pct
         if side == "long":
             entry = price * (1 + rc.slippage_pct)
@@ -475,7 +438,6 @@ class Backtester:
                 size=size,
                 stop_loss=sig.stop_loss,
                 module=sig.module,
-                regime=sig.regime.value,
                 side=side,
                 original_size=size,
                 initial_stop=sig.stop_loss,
@@ -500,7 +462,7 @@ class Backtester:
         pos.exit_reason = reason
 
     def _close_short(self, pos: BTTrade, idx: int, price: float, reason: str, rc):
-        slip = price * (1 + rc.slippage_pct)  # worse fill for short exit
+        slip = price * (1 + rc.slippage_pct)
         fees = (pos.entry_price * pos.size + slip * pos.size) * rc.fee_pct
         pos.exit_idx = idx
         pos.exit_price = slip

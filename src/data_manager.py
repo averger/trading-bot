@@ -9,10 +9,8 @@ from src.indicators import (
     compute_rsi,
     compute_bollinger_bands,
     compute_atr,
-    compute_adx,
     compute_ema,
     compute_volume_ma,
-    compute_macd,
 )
 
 log = logging.getLogger(__name__)
@@ -35,30 +33,6 @@ class DataManager:
         self._cache[symbol] = df
         return df
 
-    def get_htf_bias(self, symbol: str) -> int:
-        """Fetch higher-timeframe candles and return trend bias (1/-1/0)."""
-        sc = self.config.strategy
-        if not sc.htf_enabled:
-            return 0
-        try:
-            df = self.exchange.fetch_ohlcv(
-                symbol, sc.htf_timeframe, sc.htf_ema_slow + 10,
-            )
-            if len(df) < sc.htf_ema_slow + 2:
-                return 0
-            ema_f = compute_ema(df["close"], sc.htf_ema_fast)
-            ema_s = compute_ema(df["close"], sc.htf_ema_slow)
-            last_close = df["close"].iloc[-2]  # previous completed bar
-            ef = ema_f.iloc[-2]
-            es = ema_s.iloc[-2]
-            if ef > es and last_close > es:
-                return 1
-            if ef < es and last_close < es:
-                return -1
-            return 0
-        except Exception:
-            return 0
-
     def get_cached(self, symbol: str) -> pd.DataFrame | None:
         return self._cache.get(symbol)
 
@@ -74,30 +48,11 @@ class DataManager:
         df["atr"] = compute_atr(
             df["high"], df["low"], df["close"], ic.atr_period,
         )
-        df["adx"] = compute_adx(
-            df["high"], df["low"], df["close"], ic.adx_period,
-        )
 
-        df["ema_fast"] = compute_ema(df["close"], ic.ema_fast)
-        df["ema_slow"] = compute_ema(df["close"], ic.ema_slow)
-        df["ema_long"] = compute_ema(df["close"], ic.ema_long)
+        df["ema_short_filter"] = compute_ema(df["close"], ic.ema_short_filter)
+        df["ema_long_filter"] = compute_ema(df["close"], ic.ema_long_filter)
 
         df["volume_ma"] = compute_volume_ma(df["volume"], ic.volume_ma_period)
         df["volume_ratio"] = df["volume"] / df["volume_ma"]
-
-        # MACD
-        df["macd"], df["macd_signal"], df["macd_hist"] = compute_macd(
-            df["close"], ic.macd_fast, ic.macd_slow, ic.macd_signal,
-        )
-
-        # Previous candle EMAs for crossover detection
-        df["prev_ema_fast"] = df["ema_fast"].shift(1)
-        df["prev_ema_slow"] = df["ema_slow"].shift(1)
-
-        # Trend-follow specific EMAs (longer periods)
-        df["tf_ema_fast"] = compute_ema(df["close"], ic.tf_ema_fast)
-        df["tf_ema_slow"] = compute_ema(df["close"], ic.tf_ema_slow)
-        df["prev_tf_ema_fast"] = df["tf_ema_fast"].shift(1)
-        df["prev_tf_ema_slow"] = df["tf_ema_slow"].shift(1)
 
         return df

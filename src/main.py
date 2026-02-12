@@ -13,7 +13,6 @@ from src.strategy import Strategy, Signal
 from src.risk_manager import RiskManager
 from src.order_manager import OrderManager
 from src.logger import TradeLogger
-from src.sentiment import SentimentAnalyzer
 
 logging.basicConfig(
     level=logging.INFO,
@@ -56,7 +55,6 @@ def main():
     strategy = Strategy(config)
     risk_mgr = RiskManager(config, trade_logger)
     order_mgr = OrderManager(exchange, config, risk_mgr, trade_logger)
-    sentiment = SentimentAnalyzer(config)
 
     initial_capital = exchange.get_balance("USDT")
     risk_mgr.update_peak(initial_capital)
@@ -105,22 +103,16 @@ def main():
                     time.sleep(tick)
                     continue
 
-                # fetch sentiment data once per candle
-                fng = sentiment.fetch_fear_greed()
-                log.info("Sentiment: Fear & Greed = %d", fng)
-
                 # analyse every symbol
                 for symbol in config.trading.symbols:
                     try:
                         df = data_mgr.get_analysis(symbol)
-                        htf = data_mgr.get_htf_bias(symbol)
                         has_pos = symbol in order_mgr.positions
                         pos_mod = order_mgr.positions[symbol].module if has_pos else ""
                         pos_side = order_mgr.positions[symbol].side if has_pos else "long"
                         sig = strategy.generate_signal(
                             df, has_pos, symbol,
                             position_module=pos_mod, position_side=pos_side,
-                            fear_greed=fng, htf_bias=htf,
                         )
 
                         if sig.signal != Signal.NO_SIGNAL:

@@ -24,9 +24,9 @@ def risk_setup():
 class TestPositionSizing:
     def test_basic(self, risk_setup):
         rm, _, _ = risk_setup
-        # 4% of $100 = $4 risk.  SL dist = $1,000.  size = 0.004
+        # 3% of $100 = $3 risk.  SL dist = $1,000.  size = 0.003
         size = rm.calculate_position_size(100, 50_000, 49_000, "BTC/USDT")
-        assert 0.003 < size < 0.005
+        assert 0.002 < size < 0.004
 
     def test_zero_stop_returns_zero(self, risk_setup):
         rm, _, _ = risk_setup

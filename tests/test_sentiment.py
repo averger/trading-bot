@@ -8,7 +8,9 @@ from src.sentiment import SentimentAnalyzer
 
 class TestSentimentFilters:
     def test_extreme_greed_blocks_long(self):
-        sa = SentimentAnalyzer(Config())
+        config = Config()
+        config.sentiment.fear_greed_enabled = True
+        sa = SentimentAnalyzer(config)
         assert sa.should_block_long(90) is True
         assert sa.should_block_long(75) is True
 
@@ -18,7 +20,9 @@ class TestSentimentFilters:
         assert sa.should_block_long(50) is False
 
     def test_extreme_fear_blocks_short(self):
-        sa = SentimentAnalyzer(Config())
+        config = Config()
+        config.sentiment.fear_greed_enabled = True
+        sa = SentimentAnalyzer(config)
         assert sa.should_block_short(10) is True
         assert sa.should_block_short(25) is True
 
