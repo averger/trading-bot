@@ -62,6 +62,11 @@ class StrategyConfig:
     # Trend-following module
     trend_follow_adx_min: float = 25.0  # stronger trend required
     trend_follow_enabled: bool = True
+    # Higher-timeframe filter
+    htf_enabled: bool = True
+    htf_timeframe: str = "4h"           # higher timeframe for trend confirmation
+    htf_ema_fast: int = 9               # ~1.5 days on 4h
+    htf_ema_slow: int = 21              # ~3.5 days on 4h
 
 
 @dataclass

@@ -87,10 +87,25 @@ class Strategy:
 
     # -- master signal router -------------------------------------------
 
+    def _htf_blocks(self, signal: Signal, htf_bias: int) -> bool:
+        """Check if higher-timeframe trend blocks this entry direction.
+
+        Asymmetric: only block shorts when 4h is bullish.
+        Longs are never blocked by HTF.
+        """
+        if not self.config.strategy.htf_enabled or htf_bias == 0:
+            return False
+        # HTF bullish -> block shorts (don't short into an uptrend)
+        if signal == Signal.SHORT_ENTRY and htf_bias > 0:
+            return True
+        return False
+
+    # -- master signal router -------------------------------------------
+
     def generate_signal(
         self, df: pd.DataFrame, has_position: bool, symbol: str = "",
         position_module: str = "", position_side: str = "long",
-        fear_greed: int = -1,
+        fear_greed: int = -1, htf_bias: int = 0,
     ) -> TradeSignal:
         regime = self.detect_regime(df)
         last = df.iloc[-1]
@@ -123,11 +138,13 @@ class Strategy:
                 sig = self._mean_reversion_entry(last, regime, price, atr)
                 if sig.signal != Signal.NO_SIGNAL:
                     if not self._sentiment_blocks(sig.signal, fear_greed):
-                        return sig
+                        if not self._htf_blocks(sig.signal, htf_bias):
+                            return sig
                 sig = self._mean_reversion_short_entry(last, regime, price, atr)
                 if sig.signal != Signal.NO_SIGNAL:
                     if not self._sentiment_blocks(sig.signal, fear_greed):
-                        return sig
+                        if not self._htf_blocks(sig.signal, htf_bias):
+                            return sig
 
             # momentum (TRENDING)
             if regime == Regime.TRENDING:
@@ -136,18 +153,21 @@ class Strategy:
                     sig = self._momentum_entry(last, regime, price, atr)
                     if sig.signal != Signal.NO_SIGNAL:
                         if not self._sentiment_blocks(sig.signal, fear_greed):
-                            return sig
+                            if not self._htf_blocks(sig.signal, htf_bias):
+                                return sig
                     sig = self._momentum_short_entry(last, regime, price, atr)
                     if sig.signal != Signal.NO_SIGNAL:
                         if not self._sentiment_blocks(sig.signal, fear_greed):
-                            return sig
+                            if not self._htf_blocks(sig.signal, htf_bias):
+                                return sig
 
             # trend-follow (any regime, uses its own ADX filter)
             if self.config.strategy.trend_follow_enabled:
                 sig = self._trend_follow_entry(last, regime, price, atr)
                 if sig.signal != Signal.NO_SIGNAL:
                     if not self._sentiment_blocks(sig.signal, fear_greed):
-                        return sig
+                        if not self._htf_blocks(sig.signal, htf_bias):
+                            return sig
 
         return self._no_signal(regime, price, atr)
 

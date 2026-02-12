@@ -229,3 +229,85 @@ class TestSentimentFilter:
         # Even during extreme greed, exit still fires
         sig = s.generate_signal(df, has_position=True, fear_greed=80)
         assert sig.signal == Signal.LONG_EXIT
+
+
+class TestHTFFilter:
+    def _mr_long_df(self):
+        """DataFrame with forced MR long conditions."""
+        df = _df_with_indicators()
+        df.iloc[-1, df.columns.get_loc("rsi")] = 25.0
+        df.iloc[-1, df.columns.get_loc("adx")] = 15.0
+        bb_low = df.iloc[-1]["bb_lower"]
+        df.iloc[-1, df.columns.get_loc("close")] = bb_low - 1
+        df.iloc[-1, df.columns.get_loc("volume_ratio")] = 2.0
+        return df
+
+    def _mr_short_df(self):
+        """DataFrame with forced MR short conditions."""
+        df = _df_with_indicators()
+        df.iloc[-1, df.columns.get_loc("rsi")] = 75.0
+        df.iloc[-1, df.columns.get_loc("adx")] = 15.0
+        bb_up = df.iloc[-1]["bb_upper"]
+        df.iloc[-1, df.columns.get_loc("close")] = bb_up + 1
+        df.iloc[-1, df.columns.get_loc("volume_ratio")] = 2.0
+        df.iloc[-1, df.columns.get_loc("high")] = bb_up + 3
+        df.iloc[-1, df.columns.get_loc("ema_long")] = bb_up + 10
+        return df
+
+    def test_bearish_htf_allows_long(self):
+        s = Strategy(Config())
+        df = self._mr_long_df()
+        # htf_bias=-1 (bearish) does NOT block longs (asymmetric filter)
+        sig = s.generate_signal(df, has_position=False, htf_bias=-1)
+        assert sig.signal == Signal.LONG_ENTRY
+
+    def test_bullish_htf_blocks_short(self):
+        s = Strategy(Config())
+        df = self._mr_short_df()
+        # htf_bias=1 (bullish) should block short entry
+        sig = s.generate_signal(df, has_position=False, htf_bias=1)
+        assert sig.signal == Signal.NO_SIGNAL
+
+    def test_neutral_htf_allows_all(self):
+        s = Strategy(Config())
+        df = self._mr_long_df()
+        # htf_bias=0 (neutral) allows long
+        sig = s.generate_signal(df, has_position=False, htf_bias=0)
+        assert sig.signal == Signal.LONG_ENTRY
+
+    def test_neutral_htf_allows_short(self):
+        s = Strategy(Config())
+        df = self._mr_short_df()
+        # htf_bias=0 (neutral) allows short (only bullish blocks shorts)
+        sig = s.generate_signal(df, has_position=False, htf_bias=0)
+        assert sig.signal == Signal.SHORT_ENTRY
+
+    def test_bullish_htf_allows_long(self):
+        s = Strategy(Config())
+        df = self._mr_long_df()
+        # htf_bias=1 (bullish) allows long
+        sig = s.generate_signal(df, has_position=False, htf_bias=1)
+        assert sig.signal == Signal.LONG_ENTRY
+
+    def test_bearish_htf_allows_short(self):
+        s = Strategy(Config())
+        df = self._mr_short_df()
+        # htf_bias=-1 (bearish) allows short
+        sig = s.generate_signal(df, has_position=False, htf_bias=-1)
+        assert sig.signal == Signal.SHORT_ENTRY
+
+    def test_htf_never_blocks_exits(self):
+        s = Strategy(Config())
+        df = _df_with_indicators()
+        df.iloc[-1, df.columns.get_loc("rsi")] = 75.0
+        # Even bearish HTF doesn't block long exit
+        sig = s.generate_signal(df, has_position=True, htf_bias=-1)
+        assert sig.signal == Signal.LONG_EXIT
+
+    def test_htf_disabled_allows_all(self):
+        s = Strategy(Config())
+        s.config.strategy.htf_enabled = False
+        df = self._mr_long_df()
+        # HTF disabled -> bearish bias doesn't block
+        sig = s.generate_signal(df, has_position=False, htf_bias=-1)
+        assert sig.signal == Signal.LONG_ENTRY

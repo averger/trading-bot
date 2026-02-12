@@ -113,13 +113,14 @@ def main():
                 for symbol in config.trading.symbols:
                     try:
                         df = data_mgr.get_analysis(symbol)
+                        htf = data_mgr.get_htf_bias(symbol)
                         has_pos = symbol in order_mgr.positions
                         pos_mod = order_mgr.positions[symbol].module if has_pos else ""
                         pos_side = order_mgr.positions[symbol].side if has_pos else "long"
                         sig = strategy.generate_signal(
                             df, has_pos, symbol,
                             position_module=pos_mod, position_side=pos_side,
-                            fear_greed=fng,
+                            fear_greed=fng, htf_bias=htf,
                         )
 
                         if sig.signal != Signal.NO_SIGNAL:

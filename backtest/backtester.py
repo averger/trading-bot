@@ -157,6 +157,40 @@ class Backtester:
         df["prev_ema_slow"] = df["ema_slow"].shift(1)
         return df
 
+    def _compute_htf_bias(self, df: pd.DataFrame) -> pd.Series:
+        """Resample 1h data to 4h and compute trend bias per 1h candle.
+
+        Returns a Series aligned to df.index with values:
+          1 = bullish (4h EMA fast > slow, close > slow)
+         -1 = bearish (4h EMA fast < slow, close < slow)
+          0 = neutral
+        Uses the *previous completed* 4h bar to avoid look-ahead.
+        """
+        sc = self.config.strategy
+        tf = sc.htf_timeframe  # e.g. "4h"
+
+        df_htf = df.resample(tf).agg({
+            "open": "first", "high": "max", "low": "min",
+            "close": "last", "volume": "sum",
+        }).dropna()
+
+        if len(df_htf) < sc.htf_ema_slow + 2:
+            return pd.Series(0, index=df.index, dtype=int)
+
+        ema_f = compute_ema(df_htf["close"], sc.htf_ema_fast)
+        ema_s = compute_ema(df_htf["close"], sc.htf_ema_slow)
+
+        bias_htf = pd.Series(0, index=df_htf.index, dtype=int)
+        bias_htf[(ema_f > ema_s) & (df_htf["close"] > ema_s)] = 1
+        bias_htf[(ema_f < ema_s) & (df_htf["close"] < ema_s)] = -1
+
+        # Shift by 1 to use previous completed bar (no look-ahead)
+        bias_htf = bias_htf.shift(1).fillna(0).astype(int)
+
+        # Map back to 1h via forward-fill
+        bias_1h = bias_htf.reindex(df.index, method="ffill").fillna(0).astype(int)
+        return bias_1h
+
     def run(
         self, df: pd.DataFrame, initial_capital: float = 100.0,
         symbol: str = "", fng_history: dict[str, int] | None = None,
@@ -167,6 +201,11 @@ class Backtester:
 
         # Build date -> F&G mapping from candle index
         _fng = fng_history or {}
+
+        # HTF bias (resample 1h -> 4h)
+        htf_bias_series = pd.Series(0, index=df.index, dtype=int)
+        if self.config.strategy.htf_enabled:
+            htf_bias_series = self._compute_htf_bias(df)
 
         balance = initial_capital
         peak = initial_capital
@@ -307,10 +346,12 @@ class Backtester:
                     date_str = pd.Timestamp(ts, unit="ms").strftime("%Y-%m-%d")
                     fng_val = _fng.get(date_str, -1)
 
+            htf_val = int(htf_bias_series.iloc[i])
+
             sig = self.strategy.generate_signal(
                 window, pos is not None, symbol,
                 position_module=pos_module, position_side=pos_side,
-                fear_greed=fng_val,
+                fear_greed=fng_val, htf_bias=htf_val,
             )
 
             # LONG EXIT

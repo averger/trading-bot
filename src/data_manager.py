@@ -35,6 +35,30 @@ class DataManager:
         self._cache[symbol] = df
         return df
 
+    def get_htf_bias(self, symbol: str) -> int:
+        """Fetch higher-timeframe candles and return trend bias (1/-1/0)."""
+        sc = self.config.strategy
+        if not sc.htf_enabled:
+            return 0
+        try:
+            df = self.exchange.fetch_ohlcv(
+                symbol, sc.htf_timeframe, sc.htf_ema_slow + 10,
+            )
+            if len(df) < sc.htf_ema_slow + 2:
+                return 0
+            ema_f = compute_ema(df["close"], sc.htf_ema_fast)
+            ema_s = compute_ema(df["close"], sc.htf_ema_slow)
+            last_close = df["close"].iloc[-2]  # previous completed bar
+            ef = ema_f.iloc[-2]
+            es = ema_s.iloc[-2]
+            if ef > es and last_close > es:
+                return 1
+            if ef < es and last_close < es:
+                return -1
+            return 0
+        except Exception:
+            return 0
+
     def get_cached(self, symbol: str) -> pd.DataFrame | None:
         return self._cache.get(symbol)
 
