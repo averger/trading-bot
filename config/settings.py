@@ -85,6 +85,24 @@ class RiskConfig:
     # DCA (gradual entry into trend positions) — disabled by default
     dca_tranches: int = 1                    # 1 = disabled (enter all at once)
     dca_interval_candles: int = 336          # 2 weeks between entries (if enabled)
+    # Progressive stop (tighten as profit grows)
+    progressive_stop: bool = False
+    prog_stop_tier1_profit: float = 0.20    # after +20%, tighten stop
+    prog_stop_tier1_trail: float = 0.15     # trail at 15% from high
+    prog_stop_tier2_profit: float = 0.50    # after +50%, tighten more
+    prog_stop_tier2_trail: float = 0.10     # trail at 10% from high
+    # Volatility regime stop (tighten when vol spikes)
+    vol_stop_enabled: bool = False
+    vol_spike_threshold: float = 1.5        # vol > 1.5x avg → tighten
+    vol_tight_sl_pct: float = 0.15          # stop at 15% instead of 30%
+
+
+@dataclass
+class NotifierConfig:
+    telegram_token: str = ""
+    telegram_chat_id: str = ""
+    daily_summary_hour: int = 0       # UTC hour for daily summary (0 = midnight)
+    drawdown_alert_pct: float = 0.10  # alert when DD reaches 10%
 
 
 @dataclass
@@ -105,6 +123,7 @@ class Config:
     strategy: StrategyConfig = field(default_factory=StrategyConfig)
     risk: RiskConfig = field(default_factory=RiskConfig)
     sentiment: SentimentConfig = field(default_factory=SentimentConfig)
+    notifier: NotifierConfig = field(default_factory=NotifierConfig)
 
 
 def load_config() -> Config:
@@ -126,5 +145,9 @@ def load_config() -> Config:
         trading=TradingConfig(
             symbols=symbols,
             timeframe=os.getenv("TIMEFRAME", "1h"),
+        ),
+        notifier=NotifierConfig(
+            telegram_token=os.getenv("TELEGRAM_BOT_TOKEN", ""),
+            telegram_chat_id=os.getenv("TELEGRAM_CHAT_ID", ""),
         ),
     )

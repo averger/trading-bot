@@ -13,6 +13,7 @@ from src.indicators import (
     compute_atr,
     compute_ema,
     compute_volume_ma,
+    compute_realized_vol_ratio,
 )
 from src.strategy import Strategy, Signal
 
@@ -160,6 +161,7 @@ class Backtester:
         df["volume_ratio"] = df["volume"] / df["volume_ma"]
         df["ema_trend_fast"] = compute_ema(df["close"], ic.trend_ema_fast)
         df["ema_trend_slow"] = compute_ema(df["close"], ic.trend_ema_slow)
+        df["vol_regime"] = compute_realized_vol_ratio(df["close"], 720, 2160)
         return df
 
     def run(
@@ -235,6 +237,10 @@ class Backtester:
                         dca_count, trend_reduced = 0, False
                         result.equity_curve.append(balance)
                         continue
+
+                # -- Progressive stop + vol regime for trend positions -----
+                if pos.module == "trend":
+                    self._update_trend_stop(pos, price, highest, lowest, cur, rc)
 
                 if pos.side == "long":
                     if price > highest:
@@ -512,6 +518,44 @@ class Backtester:
                 initial_stop=sig.stop_loss,
             )
         return None
+
+    def _update_trend_stop(self, pos, price, highest, lowest, cur, rc):
+        """Tighten trend position stop based on progressive + vol regime."""
+        # Progressive stop: tighten as profit grows
+        if rc.progressive_stop:
+            if pos.side == "long":
+                profit_pct = (highest - pos.entry_price) / pos.entry_price if pos.entry_price else 0
+                if profit_pct >= rc.prog_stop_tier2_profit:
+                    new_stop = highest * (1 - rc.prog_stop_tier2_trail)
+                elif profit_pct >= rc.prog_stop_tier1_profit:
+                    new_stop = highest * (1 - rc.prog_stop_tier1_trail)
+                else:
+                    new_stop = 0
+                if new_stop > pos.stop_loss:
+                    pos.stop_loss = new_stop
+            else:  # short
+                profit_pct = (pos.entry_price - lowest) / pos.entry_price if pos.entry_price else 0
+                if profit_pct >= rc.prog_stop_tier2_profit:
+                    new_stop = lowest * (1 + rc.prog_stop_tier2_trail)
+                elif profit_pct >= rc.prog_stop_tier1_profit:
+                    new_stop = lowest * (1 + rc.prog_stop_tier1_trail)
+                else:
+                    new_stop = float("inf")
+                if new_stop < pos.stop_loss:
+                    pos.stop_loss = new_stop
+
+        # Volatility regime: tighten stop when vol spikes
+        if rc.vol_stop_enabled:
+            vol_ratio = cur.get("vol_regime", np.nan)
+            if not pd.isna(vol_ratio) and vol_ratio > rc.vol_spike_threshold:
+                if pos.side == "long":
+                    vol_stop = highest * (1 - rc.vol_tight_sl_pct)
+                    if vol_stop > pos.stop_loss:
+                        pos.stop_loss = vol_stop
+                else:  # short
+                    vol_stop = lowest * (1 + rc.vol_tight_sl_pct)
+                    if vol_stop < pos.stop_loss:
+                        pos.stop_loss = vol_stop
 
     @staticmethod
     def _unrealized(pos: BTTrade | None, price: float) -> float:

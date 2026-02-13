@@ -77,6 +77,30 @@ def compute_volume_ma(volume: pd.Series, period: int = 20) -> pd.Series:
     return volume.rolling(window=period).mean()
 
 
+def compute_realized_vol(
+    close: pd.Series, window: int = 720, annualize: int = 8760,
+) -> pd.Series:
+    """Rolling realized volatility (annualized).
+
+    Default window=720 (~30 days on 1h candles).
+    annualize=8760 (hours in a year) for 1h timeframe.
+    """
+    returns = close.pct_change()
+    return returns.rolling(window=window).std() * np.sqrt(annualize)
+
+
+def compute_realized_vol_ratio(
+    close: pd.Series, fast_window: int = 720, slow_window: int = 2160,
+) -> pd.Series:
+    """Ratio of short-term vol to long-term vol.
+
+    > 1.5 means vol is spiking relative to recent history.
+    """
+    vol_fast = close.pct_change().rolling(fast_window).std()
+    vol_slow = close.pct_change().rolling(slow_window).std()
+    return vol_fast / vol_slow
+
+
 def compute_macd(
     close: pd.Series,
     fast_period: int = 12,

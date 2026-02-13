@@ -13,6 +13,7 @@ from src.strategy import Strategy, Signal
 from src.risk_manager import RiskManager
 from src.order_manager import OrderManager
 from src.logger import TradeLogger
+from src.notifier import Notifier
 
 logging.basicConfig(
     level=logging.INFO,
@@ -55,6 +56,7 @@ def main():
     strategy = Strategy(config)
     risk_mgr = RiskManager(config, trade_logger)
     order_mgr = OrderManager(exchange, config, risk_mgr, trade_logger)
+    notifier = Notifier(config)
 
     initial_capital = exchange.get_balance("USDT")
     risk_mgr.update_peak(initial_capital)
@@ -72,7 +74,13 @@ def main():
     )
     log.info("-" * 60)
 
+    notifier.notify_startup(
+        initial_capital, config.trading.symbols, config.exchange.testnet,
+    )
+
     last_candle_hour = -1
+    last_summary_day = -1
+    dd_alerted = False
     tick = 30  # seconds between position checks
 
     # ── main loop ────────────────────────────────────────────────
@@ -98,10 +106,36 @@ def main():
                         "initial_capital", str(initial_capital),
                     )
                 )
+
+                # drawdown alert
+                if risk_mgr.peak_balance > 0:
+                    dd = 1.0 - balance / risk_mgr.peak_balance
+                    if dd >= config.notifier.drawdown_alert_pct and not dd_alerted:
+                        notifier.notify_drawdown_warning(
+                            dd * 100, balance, risk_mgr.peak_balance,
+                        )
+                        dd_alerted = True
+                    elif dd < config.notifier.drawdown_alert_pct * 0.5:
+                        dd_alerted = False  # reset when DD recovers
+
                 if not risk_mgr.check_circuit_breakers(balance, init_cap):
                     log.warning("HALTED: %s", risk_mgr.halt_reason)
+                    notifier.notify_circuit_breaker(
+                        risk_mgr.halt_reason, balance,
+                    )
                     time.sleep(tick)
                     continue
+
+                # daily summary at configured hour
+                if (now.hour == config.notifier.daily_summary_hour
+                        and now.day != last_summary_day):
+                    last_summary_day = now.day
+                    today = now.strftime("%Y-%m-%d")
+                    daily_pnl = trade_logger.get_daily_pnl(today)
+                    notifier.notify_daily_summary(
+                        balance, init_cap, order_mgr.positions,
+                        daily_pnl, risk_mgr.peak_balance,
+                    )
 
                 # analyse every symbol
                 for symbol in config.trading.symbols:
@@ -120,10 +154,38 @@ def main():
                                 "[%s] %s — %s",
                                 symbol, sig.signal.value, sig.reason,
                             )
-                            order_mgr.process_signal(sig, symbol, balance)
+                            # snapshot positions before to detect open/close
+                            had_pos = symbol in order_mgr.positions
+                            executed = order_mgr.process_signal(
+                                sig, symbol, balance,
+                            )
+
+                            if executed:
+                                new_balance = exchange.get_balance("USDT")
+                                if sig.signal in (
+                                    Signal.LONG_ENTRY, Signal.SHORT_ENTRY,
+                                ):
+                                    pos = order_mgr.positions.get(symbol)
+                                    if pos:
+                                        notifier.notify_entry(
+                                            symbol, pos.side, pos.module,
+                                            pos.entry_price, pos.size,
+                                            pos.stop_loss, new_balance,
+                                        )
+                                elif sig.signal in (
+                                    Signal.LONG_EXIT, Signal.SHORT_EXIT,
+                                ):
+                                    side = "short" if sig.signal == Signal.SHORT_EXIT else "long"
+                                    notifier.notify_exit(
+                                        symbol, side, sig.price,
+                                        0, 0, sig.reason, new_balance,
+                                    )
 
                     except Exception:
                         log.exception("Error analysing %s", symbol)
+                        notifier.notify_error(
+                            f"Error analysing {symbol}"
+                        )
 
             # position management every tick
             if order_mgr.positions:
@@ -145,10 +207,17 @@ def main():
             break
         except Exception:
             log.exception("Unexpected error in main loop")
+            notifier.notify_error("Unexpected error in main loop")
             time.sleep(60)
 
     # ── cleanup ──────────────────────────────────────────────────
     log.info("Shutting down…")
+    final_balance = 0.0
+    try:
+        final_balance = exchange.get_balance("USDT")
+    except Exception:
+        pass
+    notifier.notify_shutdown(final_balance)
     trade_logger.close()
     log.info("Goodbye.")
 
