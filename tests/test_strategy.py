@@ -110,9 +110,16 @@ class TestMRExits:
 
 
 class TestTrendFollowing:
+    def _cfg_instant_confirm(self):
+        """Config with trend_confirm_candles=1 for basic trend tests."""
+        cfg = Config()
+        cfg.strategy.trend_confirm_candles = 1
+        return cfg
+
     def test_trend_entry_in_uptrend(self):
         """Uptrend (EMA fast > slow) triggers trend entry."""
-        s = Strategy(Config())
+        cfg = self._cfg_instant_confirm()
+        s = Strategy(cfg)
         df = _df_with_indicators()
         df.iloc[-1, df.columns.get_loc("ema_trend_fast")] = 110.0
         df.iloc[-1, df.columns.get_loc("ema_trend_slow")] = 100.0
@@ -120,15 +127,41 @@ class TestTrendFollowing:
         assert sig.signal == Signal.LONG_ENTRY
         assert sig.module == "trend"
 
-    def test_no_trend_entry_in_downtrend(self):
-        """Downtrend (EMA fast < slow) does NOT trigger trend entry."""
-        s = Strategy(Config())
+    def test_no_long_entry_in_downtrend(self):
+        """Downtrend (EMA fast < slow) does NOT trigger long trend entry."""
+        cfg = self._cfg_instant_confirm()
+        s = Strategy(cfg)
         df = _df_with_indicators()
         df.iloc[-1, df.columns.get_loc("ema_trend_fast")] = 90.0
         df.iloc[-1, df.columns.get_loc("ema_trend_slow")] = 100.0
         sig = s.generate_signal(df, has_position=False)
-        # Should be NO_SIGNAL or MR entry (not trend)
-        assert sig.module != "trend"
+        assert sig.signal != Signal.LONG_ENTRY
+
+    def test_trend_short_entry_in_downtrend(self):
+        """Downtrend triggers short trend entry when enabled."""
+        cfg = self._cfg_instant_confirm()
+        cfg.strategy.trend_short_enabled = True
+        s = Strategy(cfg)
+        df = _df_with_indicators()
+        df.iloc[-1, df.columns.get_loc("ema_trend_fast")] = 90.0
+        df.iloc[-1, df.columns.get_loc("ema_trend_slow")] = 100.0
+        sig = s.generate_signal(df, has_position=False)
+        assert sig.signal == Signal.SHORT_ENTRY
+        assert sig.module == "trend"
+
+    def test_trend_short_exit_on_golden_cross(self):
+        """Trend short exits on golden cross."""
+        cfg = Config()
+        cfg.strategy.trend_short_enabled = True
+        s = Strategy(cfg)
+        df = _df_with_indicators()
+        df.iloc[-1, df.columns.get_loc("ema_trend_fast")] = 110.0
+        df.iloc[-1, df.columns.get_loc("ema_trend_slow")] = 100.0
+        sig = s.generate_signal(
+            df, has_position=True, position_module="trend",
+            position_side="short",
+        )
+        assert sig.signal == Signal.SHORT_EXIT
 
     def test_trend_exit_on_death_cross(self):
         """Trend position exits on death cross."""
@@ -155,17 +188,18 @@ class TestTrendFollowing:
 
     def test_mr_only_in_downtrend(self):
         """MR entry only fires when trend EMAs show downtrend."""
-        s = Strategy(Config())
+        cfg = self._cfg_instant_confirm()
+        s = Strategy(cfg)
         df = _force_mr_long(_df_with_indicators())
         # Set uptrend -> MR should NOT fire (trend entry instead)
         df.iloc[-1, df.columns.get_loc("ema_trend_fast")] = 110.0
         df.iloc[-1, df.columns.get_loc("ema_trend_slow")] = 100.0
         sig = s.generate_signal(df, has_position=False)
-        assert sig.module == "trend"  # trend entry takes priority
+        assert sig.module == "trend"
 
     def test_trend_stop_loss(self):
-        """Trend entry sets stop at 10% below price."""
-        cfg = Config()
+        """Trend entry sets stop at trend_sl_pct below price."""
+        cfg = self._cfg_instant_confirm()
         s = Strategy(cfg)
         df = _df_with_indicators()
         df.iloc[-1, df.columns.get_loc("ema_trend_fast")] = 110.0
@@ -174,6 +208,62 @@ class TestTrendFollowing:
         assert sig.signal == Signal.LONG_ENTRY
         expected_stop = sig.price * (1 - cfg.risk.trend_sl_pct)
         assert sig.stop_loss == pytest.approx(expected_stop, rel=0.01)
+
+
+class TestCrossoverConfirmation:
+    def test_no_entry_before_confirmation(self):
+        """Golden cross doesn't trigger entry before confirm period."""
+        cfg = Config()
+        cfg.strategy.trend_confirm_candles = 5
+        s = Strategy(cfg)
+        df = _df_with_indicators()
+        df.iloc[-1, df.columns.get_loc("ema_trend_fast")] = 110.0
+        df.iloc[-1, df.columns.get_loc("ema_trend_slow")] = 100.0
+        # Call 4 times — not enough for 5-candle confirmation
+        for _ in range(4):
+            sig = s.generate_signal(df, has_position=False)
+        assert sig.signal == Signal.NO_SIGNAL
+
+    def test_entry_after_confirmation(self):
+        """Golden cross triggers entry after confirm period."""
+        cfg = Config()
+        cfg.strategy.trend_confirm_candles = 5
+        s = Strategy(cfg)
+        df = _df_with_indicators()
+        df.iloc[-1, df.columns.get_loc("ema_trend_fast")] = 110.0
+        df.iloc[-1, df.columns.get_loc("ema_trend_slow")] = 100.0
+        # Call 5 times — should trigger on the 5th
+        for _ in range(5):
+            sig = s.generate_signal(df, has_position=False)
+        assert sig.signal == Signal.LONG_ENTRY
+        assert sig.module == "trend"
+
+    def test_counter_resets_on_death_cross(self):
+        """Counter resets when EMA fast drops below slow."""
+        cfg = Config()
+        cfg.strategy.trend_confirm_candles = 5
+        s = Strategy(cfg)
+        df = _df_with_indicators()
+
+        # 3 candles of golden cross
+        df.iloc[-1, df.columns.get_loc("ema_trend_fast")] = 110.0
+        df.iloc[-1, df.columns.get_loc("ema_trend_slow")] = 100.0
+        for _ in range(3):
+            s.generate_signal(df, has_position=False)
+        assert s._trend_cross_count == 3
+
+        # Death cross resets counter
+        df.iloc[-1, df.columns.get_loc("ema_trend_fast")] = 90.0
+        df.iloc[-1, df.columns.get_loc("ema_trend_slow")] = 100.0
+        s.generate_signal(df, has_position=False)
+        assert s._trend_cross_count == 0
+
+        # Need full 5 candles again
+        df.iloc[-1, df.columns.get_loc("ema_trend_fast")] = 110.0
+        df.iloc[-1, df.columns.get_loc("ema_trend_slow")] = 100.0
+        for _ in range(4):
+            sig = s.generate_signal(df, has_position=False)
+        assert sig.signal == Signal.NO_SIGNAL  # only 4, need 5
 
 
 class TestCooldown:

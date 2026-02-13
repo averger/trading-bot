@@ -1,4 +1,4 @@
-"""Strategy — trend following + mean-reversion (long only)."""
+"""Strategy — trend following (long + short) + mean-reversion."""
 
 import logging
 from enum import Enum
@@ -39,6 +39,8 @@ class Strategy:
         self.config = config
         self._last_trade_candle: dict[str, int] = {}  # symbol -> candle index
         self._candle_counter: int = 0
+        self._trend_cross_count: int = 0  # consecutive candles with golden cross
+        self._trend_short_count: int = 0  # consecutive candles with death cross
 
     def set_candle_index(self, idx: int):
         self._candle_counter = idx
@@ -100,16 +102,34 @@ class Strategy:
         ema_slow = last.get("ema_trend_slow", np.nan)
         if pd.isna(ema_fast) or pd.isna(ema_slow):
             return self._no_signal(price, atr)
+        confirm = self.config.strategy.trend_confirm_candles
         if ema_fast > ema_slow:
-            stop = price * (1 - self.config.risk.trend_sl_pct)
-            return TradeSignal(
-                signal=Signal.LONG_ENTRY,
-                module="trend",
-                price=price,
-                atr=atr,
-                stop_loss=stop,
-                reason=f"TREND LONG: EMA_fast > EMA_slow",
-            )
+            self._trend_cross_count += 1
+            self._trend_short_count = 0
+            if self._trend_cross_count >= confirm:
+                stop = price * (1 - self.config.risk.trend_sl_pct)
+                return TradeSignal(
+                    signal=Signal.LONG_ENTRY,
+                    module="trend",
+                    price=price,
+                    atr=atr,
+                    stop_loss=stop,
+                    reason=f"TREND LONG: confirmed {self._trend_cross_count}h",
+                )
+        else:
+            self._trend_cross_count = 0
+            self._trend_short_count += 1
+            if (self.config.strategy.trend_short_enabled
+                    and self._trend_short_count >= confirm):
+                stop = price * (1 + self.config.risk.trend_sl_pct)
+                return TradeSignal(
+                    signal=Signal.SHORT_ENTRY,
+                    module="trend",
+                    price=price,
+                    atr=atr,
+                    stop_loss=stop,
+                    reason=f"TREND SHORT: confirmed {self._trend_short_count}h",
+                )
         return self._no_signal(price, atr)
 
     def _check_trend_exit(
@@ -127,6 +147,25 @@ class Strategy:
                 atr=atr,
                 stop_loss=0,
                 reason="TREND EXIT: death cross",
+            )
+        return None
+
+    def _check_trend_short_exit(
+        self, last, price: float, atr: float,
+    ) -> TradeSignal | None:
+        """Trend short exits on golden cross (mirror of trend long)."""
+        ema_fast = last.get("ema_trend_fast", np.nan)
+        ema_slow = last.get("ema_trend_slow", np.nan)
+        if pd.isna(ema_fast) or pd.isna(ema_slow):
+            return None
+        if ema_fast > ema_slow:
+            return TradeSignal(
+                signal=Signal.SHORT_EXIT,
+                module="exit",
+                price=price,
+                atr=atr,
+                stop_loss=0,
+                reason="TREND SHORT EXIT: golden cross",
             )
         return None
 
@@ -226,6 +265,8 @@ class Strategy:
         position_module: str = "",
     ) -> TradeSignal | None:
         if position_side == "short":
+            if position_module == "trend":
+                return self._check_trend_short_exit(last, price, atr)
             return self._check_short_exit(last, price, atr)
 
         # Trend position: exit only on death cross

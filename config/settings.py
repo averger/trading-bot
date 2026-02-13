@@ -11,14 +11,15 @@ class ExchangeConfig:
     api_key: str = ""
     api_secret: str = ""
     testnet: bool = True
-    market_type: str = "spot"       # "spot" or "futures"
-    leverage: int = 1               # 1x for spot
+    market_type: str = "futures"    # "spot" or "futures"
+    leverage: int = 1               # 1x (no leverage)
 
 
 @dataclass
 class TradingConfig:
     symbols: list = field(default_factory=lambda: [
         "BTC/USDT",
+        "SOL/USDT",
     ])
     timeframe: str = "1h"
     candle_limit: int = 100  # candles to fetch for indicator warmup
@@ -49,6 +50,12 @@ class StrategyConfig:
     max_atr_pct: float = 0.06
     # Trend following
     trend_enabled: bool = True
+    trend_confirm_candles: int = 48     # golden cross must hold 48h (2 days)
+    trend_short_enabled: bool = True    # short on death cross (requires futures)
+    # Trend hedging (partial sell/rebuy on RSI) — disabled by default
+    trend_rsi_reduce: float = 95.0      # sell 50% when RSI > 95 (effectively off)
+    trend_rsi_rebuy: float = 50.0       # re-buy when RSI drops < 50
+    trend_reduce_pct: float = 0.50      # sell 50% of position
 
 
 @dataclass
@@ -73,7 +80,11 @@ class RiskConfig:
     capital_alloc_pct: float = 0.0            # 0 = use per-module sizing
     # Trend following
     trend_alloc_pct: float = 0.95            # 95% allocation for trend trades
+    trend_short_alloc_pct: float = 0.95      # 95% allocation for trend shorts
     trend_sl_pct: float = 0.30               # 30% stop for trend (crash protection only)
+    # DCA (gradual entry into trend positions) — disabled by default
+    dca_tranches: int = 1                    # 1 = disabled (enter all at once)
+    dca_interval_candles: int = 336          # 2 weeks between entries (if enabled)
 
 
 @dataclass

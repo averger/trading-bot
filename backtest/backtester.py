@@ -178,6 +178,11 @@ class Backtester:
         trailing = False
         candles_held = 0
         partial_pnl_accum = 0.0
+        # DCA state
+        dca_count = 0
+        dca_last_candle = 0
+        # RSI hedging state
+        trend_reduced = False
 
         warmup_vals = [
             self.config.indicators.bb_period,
@@ -223,10 +228,11 @@ class Backtester:
                             self._close_long(pos, i, price, reason, rc)
                         else:
                             self._close_short(pos, i, price, reason, rc)
-                        pos.pnl += partial_pnl_accum
-                        balance += pos.pnl
+                        balance += pos.pnl  # partials already in balance
+                        pos.pnl += partial_pnl_accum  # include in trade record
                         result.trades.append(pos)
                         pos, trailing, candles_held, partial_pnl_accum = None, False, 0, 0.0
+                        dca_count, trend_reduced = 0, False
                         result.equity_curve.append(balance)
                         continue
 
@@ -237,12 +243,40 @@ class Backtester:
                     # stop-loss (use candle low for realism)
                     if cur["low"] <= pos.stop_loss:
                         self._close_long(pos, i, pos.stop_loss, "stop_loss", rc)
-                        pos.pnl += partial_pnl_accum
-                        balance += pos.pnl
+                        balance += pos.pnl  # partials already in balance
+                        pos.pnl += partial_pnl_accum  # include in trade record
                         result.trades.append(pos)
                         pos, trailing, candles_held, partial_pnl_accum = None, False, 0, 0.0
+                        dca_count, trend_reduced = 0, False
                         result.equity_curve.append(balance)
                         continue
+
+                    # -- RSI hedging for trend positions ---------
+                    if pos.module == "trend":
+                        sc = self.config.strategy
+                        rsi = cur["rsi"]
+                        # Sell portion when RSI > threshold
+                        if not trend_reduced and rsi > sc.trend_rsi_reduce:
+                            sell_size = pos.size * sc.trend_reduce_pct
+                            ptp = (price - pos.entry_price) * sell_size
+                            fees = (pos.entry_price * sell_size + price * sell_size) * rc.fee_pct
+                            partial_pnl_accum += ptp - fees
+                            balance += ptp - fees
+                            pos.size -= sell_size
+                            trend_reduced = True
+                        # Re-buy when RSI cools down and still in uptrend
+                        elif trend_reduced and rsi < sc.trend_rsi_rebuy:
+                            ema_f = cur.get("ema_trend_fast", np.nan)
+                            ema_s = cur.get("ema_trend_slow", np.nan)
+                            if not pd.isna(ema_f) and not pd.isna(ema_s) and ema_f > ema_s:
+                                rebuy_alloc = balance * sc.trend_reduce_pct * rc.trend_alloc_pct
+                                add_size = rebuy_alloc / price
+                                if add_size * price <= balance:
+                                    total = pos.size + add_size
+                                    pos.entry_price = (pos.entry_price * pos.size + price * add_size) / total
+                                    pos.size = total
+                                    pos.original_size = total
+                                    trend_reduced = False
 
                     if pos.module != "trend":
                         # partial take-profit (MR only)
@@ -274,10 +308,11 @@ class Backtester:
                     # stop-loss for short (use candle high)
                     if cur["high"] >= pos.stop_loss:
                         self._close_short(pos, i, pos.stop_loss, "stop_loss", rc)
-                        pos.pnl += partial_pnl_accum
-                        balance += pos.pnl
+                        balance += pos.pnl  # partials already in balance
+                        pos.pnl += partial_pnl_accum  # include in trade record
                         result.trades.append(pos)
                         pos, trailing, candles_held, partial_pnl_accum = None, False, 0, 0.0
+                        dca_count, trend_reduced = 0, False
                         result.equity_curve.append(balance)
                         continue
 
@@ -311,10 +346,11 @@ class Backtester:
                             self._close_long(pos, i, price, "time_stop", rc)
                         else:
                             self._close_short(pos, i, price, "time_stop", rc)
-                        pos.pnl += partial_pnl_accum
-                        balance += pos.pnl
+                        balance += pos.pnl  # partials already in balance
+                        pos.pnl += partial_pnl_accum  # include in trade record
                         result.trades.append(pos)
                         pos, trailing, candles_held, partial_pnl_accum = None, False, 0, 0.0
+                        dca_count, trend_reduced = 0, False
                         result.equity_curve.append(balance)
                         continue
 
@@ -332,20 +368,22 @@ class Backtester:
             # LONG EXIT
             if sig.signal == Signal.LONG_EXIT and pos is not None and pos.side == "long":
                 self._close_long(pos, i, price, sig.reason, rc)
-                pos.pnl += partial_pnl_accum
-                balance += pos.pnl
+                balance += pos.pnl  # partials already in balance
+                pos.pnl += partial_pnl_accum  # include in trade record
                 result.trades.append(pos)
                 self.strategy.record_trade(symbol)
                 pos, trailing, candles_held, partial_pnl_accum = None, False, 0, 0.0
+                dca_count, trend_reduced = 0, False
 
             # SHORT EXIT
             elif sig.signal == Signal.SHORT_EXIT and pos is not None and pos.side == "short":
                 self._close_short(pos, i, price, sig.reason, rc)
-                pos.pnl += partial_pnl_accum
-                balance += pos.pnl
+                balance += pos.pnl  # partials already in balance
+                pos.pnl += partial_pnl_accum  # include in trade record
                 result.trades.append(pos)
                 self.strategy.record_trade(symbol)
                 pos, trailing, candles_held, partial_pnl_accum = None, False, 0, 0.0
+                dca_count, trend_reduced = 0, False
 
             # LONG ENTRY
             elif sig.signal == Signal.LONG_ENTRY and pos is None:
@@ -358,7 +396,11 @@ class Backtester:
                     trailing = False
                     candles_held = 0
                     partial_pnl_accum = 0.0
+                    trend_reduced = False
                     self.strategy.record_trade(symbol)
+                    if sig.module == "trend":
+                        dca_count = 1
+                        dca_last_candle = i
 
             # SHORT ENTRY
             elif sig.signal == Signal.SHORT_ENTRY and pos is None:
@@ -373,6 +415,28 @@ class Backtester:
                     partial_pnl_accum = 0.0
                     self.strategy.record_trade(symbol)
 
+            # -- DCA: add to trend position at intervals -------
+            if (
+                pos is not None
+                and pos.module == "trend"
+                and rc.dca_tranches > 1
+                and dca_count < rc.dca_tranches
+                and (i - dca_last_candle) >= rc.dca_interval_candles
+            ):
+                ema_f = cur.get("ema_trend_fast", np.nan)
+                ema_s = cur.get("ema_trend_slow", np.nan)
+                if not pd.isna(ema_f) and not pd.isna(ema_s) and ema_f > ema_s:
+                    tranche_alloc = balance * (rc.trend_alloc_pct / rc.dca_tranches)
+                    add_size = tranche_alloc / price
+                    margin_needed = add_size * price
+                    if margin_needed <= balance * 0.95:  # keep 5% cash buffer
+                        total = pos.size + add_size
+                        pos.entry_price = (pos.entry_price * pos.size + price * add_size) / total
+                        pos.size = total
+                        pos.original_size = total
+                        dca_count += 1
+                        dca_last_candle = i
+
             if balance > peak:
                 peak = balance
             result.equity_curve.append(
@@ -385,8 +449,8 @@ class Backtester:
                 self._close_long(pos, len(df) - 1, df.iloc[-1]["close"], "backtest_end", rc)
             else:
                 self._close_short(pos, len(df) - 1, df.iloc[-1]["close"], "backtest_end", rc)
-            pos.pnl += partial_pnl_accum
-            balance += pos.pnl
+            balance += pos.pnl  # partials already in balance
+            pos.pnl += partial_pnl_accum  # include in trade record
             result.trades.append(pos)
             if result.equity_curve:
                 result.equity_curve[-1] = balance
@@ -400,7 +464,12 @@ class Backtester:
 
         # Trend positions: capital allocation sizing
         if sig.module == "trend" and getattr(rc, 'trend_alloc_pct', 0) > 0:
-            alloc = balance * rc.trend_alloc_pct
+            if side == "short":
+                alloc = balance * getattr(rc, 'trend_short_alloc_pct', rc.trend_alloc_pct)
+            else:
+                alloc = balance * rc.trend_alloc_pct
+            if side == "long" and rc.dca_tranches > 1:
+                alloc /= rc.dca_tranches
             if peak > 0 and (1 - balance / peak) >= rc.max_drawdown_reduce:
                 alloc *= 0.5
             size = (alloc / price) * leverage
