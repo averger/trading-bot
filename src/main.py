@@ -74,6 +74,14 @@ def main():
     )
     log.info("-" * 60)
 
+    # warmup: fetch historical candles for EMA convergence
+    for symbol in config.trading.symbols:
+        try:
+            data_mgr.warmup(symbol)
+        except Exception:
+            log.exception("Warmup failed for %s", symbol)
+            notifier.notify_error(f"Warmup failed for {symbol}")
+
     notifier.notify_startup(
         initial_capital, config.trading.symbols, config.exchange.testnet,
     )
